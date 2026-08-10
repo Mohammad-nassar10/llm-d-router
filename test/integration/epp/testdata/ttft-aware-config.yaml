@@ -1,0 +1,37 @@
+# TTFT-aware routing stack for integration tests.
+#
+# The observer's windows are far shorter than production defaults so a handful
+# of requests produces a usable floor and operating anchors.
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: latency-observer-producer
+    name: ttft-observer
+    parameters:
+      intervalDuration: 100ms
+      windowSize: 200
+      maxObservationAge: 1m
+      maxRequests: 50
+      minRequests: 1
+      lowPercentile: 25
+      highPercentile: 50
+      bucketDuration: 100ms
+      bucketHistorySize: 2
+  - type: ttft-aware-scorer
+    name: ttft
+    parameters:
+      explorationRate: 0
+      minInflightGap: 1
+      ttftPercentilesProducerName: ttft-observer
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: ttft
+requestHandler:
+  parsers:
+    - pluginRef: openai-parser
+dataLayer:
+  sources:
+    - pluginRef: mock-metrics-source
