@@ -22,68 +22,47 @@ import (
 	observerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/latencyobserver/constants"
 )
 
-// TTFTPercentilesDataKey carries the per-endpoint TTFT distribution summary the
-// ttft-aware-scorer reads. Published by the latency-observer-producer, which
-// recomputes it on its own cadence rather than per request.
+// TTFTPercentilesDataKey carries the per-endpoint TTFT summary the
+// ttft-aware-scorer reads, published by the latency-observer-producer.
 var TTFTPercentilesDataKey = plugin.NewDataKey("TTFTPercentilesDataKey", observerconstants.LatencyObserverProducerType)
 
 // TTFTPercentiles summarises an endpoint's recent time-to-first-token
-// distribution as the three points of a TTFT-vs-load curve, plus the evidence
-// needed to decide whether that curve can be trusted.
+// distribution. All TTFT values are in seconds.
 //
-//	A — (0, P10LowTTFT)                 the queue-free service floor
-//	B — (InflightAtLow,  LowTTFT)       low operating point  (default P25)
-//	C — (InflightAtHigh, HighTTFT)      high operating point (default P50)
-//
-// The current in-flight count is deliberately NOT a field here. It is read live
-// from the InFlightLoad attribute at scoring time, so the prediction is
-// evaluated at the endpoint's load right now rather than at its load when this
-// snapshot was last computed.
-//
-// All TTFT values are in seconds.
+// The current in-flight count is deliberately not a field: the scorer reads it
+// live from the InFlightLoad attribute, so its prediction reflects the load
+// right now rather than the load when this snapshot was computed.
 type TTFTPercentiles struct {
-	// P10LowTTFT is the load-invariant service floor: a low percentile over a
-	// history of per-bucket low percentiles. Zero until enough observations
-	// have accumulated, which reads as "cold". See Floor.
+	// Load-invariant service floor: a low percentile over a history of
+	// per-bucket low percentiles. See Floor.
 	P10LowTTFT float64
-
-	// P10TTFT is the 10th percentile over the short window. Used as the floor
-	// before the bucket history has filled.
+	// Short-window P10, used as the floor before the bucket history fills.
 	P10TTFT float64
 
-	// LowTTFT and HighTTFT are the TTFTs at the low and high operating
-	// percentiles (default P25 and P50) over the short window.
+	// TTFT at the low and high operating percentiles, default P25 and P50.
 	LowTTFT  float64
 	HighTTFT float64
-
-	// InflightAtLow and InflightAtHigh are the average in-flight-at-dispatch
-	// counts in the percentile bands around LowTTFT and HighTTFT. Averaging a
-	// band rather than a single observation stabilises the estimate.
+	// Average in-flight-at-dispatch in the bands around them. A band rather
+	// than a single observation stabilises the estimate.
 	InflightAtLow  float64
 	InflightAtHigh float64
 
-	// RecentN is the number of observations in the short window. Gates whether
-	// the operating points are trusted.
+	// Observations in the short window; gates whether the operating points are
+	// trusted.
 	RecentN int
-
-	// Observations is the cumulative count that has fed the floor. Gates Floor.
-	// Cumulative rather than windowed so an endpoint that has already
-	// calibrated does not read as cold again after going briefly idle.
+	// Cumulative count feeding the floor, so an endpoint that has already
+	// calibrated does not read cold again after going briefly idle.
 	Observations int64
-
-	// MinRequests is the observation threshold, copied from the producer's
-	// config so consumers need no separate parameter to interpret RecentN and
-	// Observations.
+	// Threshold copied from the producer's config, so consumers need no
+	// separate parameter to interpret RecentN and Observations.
 	MinRequests int
 }
 
-// Floor returns the load-invariant service floor: P10LowTTFT, or P10TTFT before
-// the bucket history has filled.
+// Floor returns the service floor, or zero when the endpoint is cold.
 //
-// Zero means the endpoint is cold. An endpoint observed fewer than MinRequests
-// times is also reported cold: a percentile over a handful of cold-start
-// requests is noise, and returning it would let a barely-observed endpoint
-// compete on a value that happens to look good.
+// Fewer than MinRequests observations also reads as cold: a percentile over a
+// handful of cold-start requests is noise, and returning it would let a
+// barely-observed endpoint compete on a value that happens to look good.
 func (m *TTFTPercentiles) Floor() float64 {
 	if m == nil || m.Observations < int64(m.MinRequests) {
 		return 0
@@ -94,9 +73,7 @@ func (m *TTFTPercentiles) Floor() float64 {
 	return m.P10TTFT
 }
 
-// Clone returns an independent copy. The value-copy idiom covers every field
-// automatically; new fields need no change here as long as they stay value
-// types.
+// Clone returns an independent copy.
 func (m *TTFTPercentiles) Clone() fwkdl.Cloneable {
 	if m == nil {
 		return nil

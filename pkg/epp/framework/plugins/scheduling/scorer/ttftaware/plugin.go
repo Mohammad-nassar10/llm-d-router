@@ -17,7 +17,7 @@ limitations under the License.
 // Package ttftaware routes each request to the endpoint with the lowest
 // predicted time-to-first-token under its current load. The prediction is a
 // piecewise-linear curve through the endpoint's measured points, evaluated at
-// its live in-flight count. See README.md for the model and its rationale.
+// its live in-flight count. See README.md for the curve and its rationale.
 package ttftaware
 
 import (
@@ -246,7 +246,7 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 	if debugLogger := log.FromContext(ctx).V(logutil.DEBUG); debugLogger.Enabled() {
 		for i, endpoint := range endpoints {
 			debugLogger.Info("ttft-aware score",
-				"endpoint", endpoint.GetMetadata().String(),
+				"endpoint", endpoint.GetMetadata().ID.String(),
 				"predictedTTFT", evals[i].pred,
 				"score", scores[endpoint],
 				"trusted", evals[i].trusted,

@@ -80,17 +80,18 @@ func flushConfig() Config {
 }
 
 func TestFlush(t *testing.T) {
+	ctx := context.Background()
 	now := time.Now()
 
 	t.Run("publishes the operating anchors from the short window", func(t *testing.T) {
 		p := newObserverWithConfig(t, flushConfig())
 		// Ten observations: TTFT rises with the in-flight count it was
-		// dispatched at, which is the relationship the scorer's curve models.
+		// dispatched at, which is the relationship the scorer's curve captures.
 		for i := range 10 {
 			p.record("default/a", 0.1+float64(i)*0.1, int64(i), now.Add(time.Duration(i)*time.Millisecond))
 		}
 
-		p.flushAll(now.Add(time.Second))
+		p.flushAll(ctx, now.Add(time.Second))
 
 		snapshot := p.stateFor("default/a").published.Load()
 		require.NotNil(t, snapshot)
@@ -106,7 +107,7 @@ func TestFlush(t *testing.T) {
 		p := newObserverWithConfig(t, flushConfig())
 		p.stateFor("default/a")
 
-		p.flushAll(now)
+		p.flushAll(ctx, now)
 
 		snapshot := p.stateFor("default/a").published.Load()
 		require.NotNil(t, snapshot)
@@ -121,7 +122,7 @@ func TestFlush(t *testing.T) {
 		}
 
 		// First flush only starts the bucket clock.
-		p.flushAll(now)
+		p.flushAll(ctx, now)
 		assert.Zero(t, p.stateFor("default/a").published.Load().P10LowTTFT)
 	})
 
@@ -139,8 +140,8 @@ func TestFlush(t *testing.T) {
 		// Roll exactly one bucket later: the bucket window looks back
 		// bucketDuration, so flushing further out would leave the observations
 		// behind its cutoff and close an empty bucket.
-		p.flushAll(now)                  // starts the bucket
-		p.flushAll(now.Add(time.Second)) // bucket elapsed -> rolls
+		p.flushAll(ctx, now)                  // starts the bucket
+		p.flushAll(ctx, now.Add(time.Second)) // bucket elapsed -> rolls
 
 		snapshot := p.stateFor("default/a").published.Load()
 		require.NotNil(t, snapshot)
@@ -154,8 +155,8 @@ func TestFlush(t *testing.T) {
 			p.record("default/a", 0.1, 1, now.Add(time.Duration(i)*time.Millisecond))
 		}
 
-		p.flushAll(now)
-		p.flushAll(now.Add(time.Second))
+		p.flushAll(ctx, now)
+		p.flushAll(ctx, now.Add(time.Second))
 
 		snapshot := p.stateFor("default/a").published.Load()
 		require.NotNil(t, snapshot)
@@ -172,7 +173,7 @@ func TestFlush(t *testing.T) {
 			for i := range 5 {
 				p.record("default/a", 0.1+float64(i)*0.1, 1, at.Add(time.Duration(i)*time.Millisecond))
 			}
-			p.flushAll(at)
+			p.flushAll(ctx, at)
 			at = at.Add(2 * time.Second)
 		}
 
@@ -186,7 +187,7 @@ func TestFlush(t *testing.T) {
 		p.record("default/a", 0.2, 1, now)
 		p.record("default/b", 0.4, 2, now)
 
-		p.flushAll(now.Add(time.Second))
+		p.flushAll(ctx, now.Add(time.Second))
 
 		assert.NotNil(t, p.stateFor("default/a").published.Load())
 		assert.NotNil(t, p.stateFor("default/b").published.Load())
@@ -224,6 +225,7 @@ func TestFlushLoopStopsWithContext(t *testing.T) {
 // The observer feeds the scorer: an endpoint that has served enough requests
 // publishes anchors that make it trusted rather than cold.
 func TestFlushProducesATrustedSnapshot(t *testing.T) {
+	ctx := context.Background()
 	now := time.Now()
 	p := newObserverWithConfig(t, flushConfig())
 
@@ -231,8 +233,8 @@ func TestFlushProducesATrustedSnapshot(t *testing.T) {
 	for i := range 16 {
 		p.record("default/a", 0.2+float64(i)*0.05, int64(i), now.Add(time.Duration(i)*time.Millisecond))
 	}
-	p.flushAll(now)
-	p.flushAll(now.Add(time.Second))
+	p.flushAll(ctx, now)
+	p.flushAll(ctx, now.Add(time.Second))
 
 	snapshot := p.stateFor("default/a").published.Load()
 	require.NotNil(t, snapshot)

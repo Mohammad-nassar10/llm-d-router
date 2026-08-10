@@ -49,14 +49,9 @@ func (t *slidingWindowTracker) add(value float64, inflight int64, ts time.Time) 
 	}
 }
 
-// window returns the observations newer than maxAge, capped to the most recent
-// maxN (0 means no cap), sorted ascending by value.
-//
-// The scan stops at the first entry older than the cutoff, which assumes
-// append order matches timestamp order. Concurrent callers take their timestamp
-// just before acquiring the lock, so two entries can invert by microseconds —
-// which only matters at the age boundary, and truncates the window by an entry
-// or two at most.
+// window returns the observations within maxAge, capped to the most recent maxN
+// (0 = no cap), sorted ascending by value. Observations are stored in time order,
+// so the newest-first scan stops at the first one older than the cutoff.
 func (t *slidingWindowTracker) window(now time.Time, maxAge time.Duration, maxN int) []observation {
 	cutoff := now.Add(-maxAge)
 	size := len(t.buf)
@@ -110,10 +105,10 @@ func percentileFloat64(sorted []float64, p float64) float64 {
 	return sorted[lo] + (idx-float64(lo))*(sorted[lo+1]-sorted[lo])
 }
 
-// dropMinMax is the floor history's eviction policy: when full, the extreme
-// buckets are dropped rather than the oldest, so a single anomalously fast or
-// slow bucket never sticks. The trade-off is that the floor adapts to a
-// permanent shift only gradually, and drifts upward over long runs.
+// dropMinMax removes the smallest and largest entries from a value-sorted slice,
+// reusing the backing array. It is the floor history's eviction policy: when the
+// per-bucket P10 history is full, the extreme buckets are dropped rather than the
+// oldest, so a single anomalously fast or slow bucket never sticks in the history.
 func dropMinMax(sorted []float64) []float64 {
 	if len(sorted) < 2 {
 		return sorted

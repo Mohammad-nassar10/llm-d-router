@@ -21,6 +21,9 @@ import (
 	"sort"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
@@ -39,7 +42,7 @@ func (p *Observer) flushLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			p.flushAll(now)
+			p.flushAll(ctx, now)
 		}
 	}
 }
@@ -47,16 +50,41 @@ func (p *Observer) flushLoop(ctx context.Context) {
 // flushAll recomputes and publishes every endpoint's snapshot. The endpoint set
 // is snapshotted under a read lock and released before any flush runs, so a
 // slow recompute never blocks an endpoint appearing or disappearing.
-func (p *Observer) flushAll(now time.Time) {
+func (p *Observer) flushAll(ctx context.Context, now time.Time) {
+	type entry struct {
+		id    string
+		state *endpointState
+	}
+
 	p.mu.RLock()
-	states := make([]*endpointState, 0, len(p.state))
-	for _, state := range p.state {
-		states = append(states, state)
+	entries := make([]entry, 0, len(p.state))
+	for id, state := range p.state {
+		entries = append(entries, entry{id: id, state: state})
 	}
 	p.mu.RUnlock()
 
-	for _, state := range states {
-		state.published.Store(state.flush(now, p.cfg))
+	// The published anchors are otherwise only visible through StateDumper,
+	// which the standalone file-discovery mode does not serve — so this log is
+	// the only way to see them in a multi-cluster hub.
+	debugLogger := log.FromContext(ctx).V(logutil.DEBUG)
+
+	for _, e := range entries {
+		snapshot := e.state.flush(now, p.cfg)
+		e.state.published.Store(snapshot)
+
+		if debugLogger.Enabled() {
+			debugLogger.Info("ttft-percentiles published",
+				"endpoint", e.id,
+				"floorSeconds", snapshot.Floor(),
+				"p10LowSeconds", snapshot.P10LowTTFT,
+				"lowSeconds", snapshot.LowTTFT,
+				"highSeconds", snapshot.HighTTFT,
+				"inflightAtLow", snapshot.InflightAtLow,
+				"inflightAtHigh", snapshot.InflightAtHigh,
+				"recentN", snapshot.RecentN,
+				"observations", snapshot.Observations,
+				"minRequests", snapshot.MinRequests)
+		}
 	}
 }
 
