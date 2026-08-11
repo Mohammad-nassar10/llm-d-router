@@ -159,10 +159,12 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 	})
 }
 
-func TestStateForIsStableUnderConcurrency(t *testing.T) {
+// Concurrent callers must share one state instance and lose no observations.
+// Run under -race to also catch unsynchronised access.
+func TestConcurrentRecording(t *testing.T) {
 	p := newObserver(t)
 
-	const goroutines = 32
+	const goroutines, perGoroutine = 16, 50
 	var wg sync.WaitGroup
 	seen := make([]*endpointState, goroutines)
 	for i := range goroutines {
@@ -170,24 +172,6 @@ func TestStateForIsStableUnderConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			seen[i] = p.stateFor("default/a")
-		}()
-	}
-	wg.Wait()
-
-	for i := 1; i < goroutines; i++ {
-		assert.Same(t, seen[0], seen[i], "every caller must get the same state instance")
-	}
-}
-
-func TestRecordIsSafeUnderConcurrency(t *testing.T) {
-	p := newObserver(t)
-
-	const goroutines, perGoroutine = 16, 50
-	var wg sync.WaitGroup
-	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
 			for range perGoroutine {
 				p.record("default/a", 0.5, 3, time.Now())
 			}
@@ -195,6 +179,9 @@ func TestRecordIsSafeUnderConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 
+	for i := 1; i < goroutines; i++ {
+		assert.Same(t, seen[0], seen[i], "every caller must get the same state instance")
+	}
 	state := p.stateFor("default/a")
 	state.mu.Lock()
 	defer state.mu.Unlock()

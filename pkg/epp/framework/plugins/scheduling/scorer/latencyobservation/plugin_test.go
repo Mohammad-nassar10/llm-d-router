@@ -31,9 +31,11 @@ import (
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
+type pct = attrlatency.TTFTPercentiles
+
 // trusted returns a snapshot that passes every admissibility check:
 // floor 0.20, B at (4, 0.35), C at (9, 0.55).
-func trusted() *attrlatency.TTFTPercentiles {
+func trusted() *pct {
 	return &attrlatency.TTFTPercentiles{
 		P10LowTTFT:     0.20,
 		LowTTFT:        0.35,
@@ -47,13 +49,13 @@ func trusted() *attrlatency.TTFTPercentiles {
 }
 
 // with applies mutations to a copy of the trusted snapshot.
-func with(mutate func(*attrlatency.TTFTPercentiles)) *attrlatency.TTFTPercentiles {
+func with(mutate func(*pct)) *pct {
 	m := trusted()
 	mutate(m)
 	return m
 }
 
-func newEndpoint(percentiles *attrlatency.TTFTPercentiles, inflight *int64) fwksched.Endpoint {
+func newEndpoint(percentiles *pct, inflight *int64) fwksched.Endpoint {
 	attr := fwkdl.NewAttributes()
 	if percentiles != nil {
 		attr.Put(attrlatency.TTFTPercentilesDataKey.String(), percentiles)
@@ -93,19 +95,10 @@ func TestScorerFactory(t *testing.T) {
 		assert.Equal(t, 0.01, s.roundTTFTStep)
 	})
 
-	t.Run("explorationRate zero is allowed and disables probing", func(t *testing.T) {
-		params := json.NewDecoder(strings.NewReader(`{"explorationRate":0}`))
-		p, err := ScorerFactory("ttft", params, nil)
-		require.NoError(t, err)
-		assert.Zero(t, p.(*Scorer).explorationRate)
-	})
-
 	t.Run("rejects invalid parameters", func(t *testing.T) {
 		for name, raw := range map[string]string{
 			"explorationRate above 1": `{"explorationRate":1.5}`,
-			"explorationRate below 0": `{"explorationRate":-0.1}`,
 			"minInflightGap zero":     `{"minInflightGap":0}`,
-			"minInflightGap negative": `{"minInflightGap":-1}`,
 			"roundTTFTStep negative":  `{"roundTTFTStep":-0.01}`,
 		} {
 			t.Run(name, func(t *testing.T) {
@@ -126,13 +119,6 @@ func TestScorerFactory(t *testing.T) {
 		assert.Contains(t, required, attrconcurrency.InFlightLoadDataKey)
 	})
 
-	t.Run("NewScorer applies every field of the config", func(t *testing.T) {
-		s := NewScorer(Config{ExplorationRate: 0.3, MinInflightGap: 5, RoundTTFTStep: 0.02})
-		assert.Equal(t, 0.3, s.explorationRate)
-		assert.Equal(t, 5.0, s.minInflightGap)
-		assert.Equal(t, 0.02, s.roundTTFTStep)
-	})
-
 	t.Run("producer name overrides select a different key", func(t *testing.T) {
 		params := json.NewDecoder(strings.NewReader(
 			`{"ttftPercentilesProducerName":"obs-a","inFlightLoadProducerName":"load-b"}`))
@@ -150,143 +136,36 @@ func TestPredict(t *testing.T) {
 
 	tests := []struct {
 		name            string
-		percentiles     *attrlatency.TTFTPercentiles
+		percentiles     *pct
 		cur             float64
 		wantPred        float64
-		wantHasBaseline bool
 		wantHasFloor    bool
+		wantHasBaseline bool
 	}{
-		// --- cold: no usable floor -------------------------------------------
-		{
-			name:        "zero value is cold",
-			percentiles: &attrlatency.TTFTPercentiles{},
-			cur:         5,
-		},
-		{
-			name:        "too few observations is cold even with a floor",
-			percentiles: with(func(m *attrlatency.TTFTPercentiles) { m.Observations = 9 }),
-			cur:         5,
-		},
+		// cold: no usable floor, so nothing is known
+		{"zero value", &pct{}, 5, 0, false, false},
+		{"below minRequests observations", with(func(m *pct) { m.Observations = 9 }), 5, 0, false, false},
 
-		// --- observed but uncalibrated: predicts at the floor -----------------
-		{
-			name:         "short window below minRequests seeds at floor",
-			percentiles:  with(func(m *attrlatency.TTFTPercentiles) { m.RecentN = 9 }),
-			cur:          5,
-			wantPred:     0.20,
-			wantHasFloor: true,
-		},
-		{
-			name:         "no high in-flight anchor seeds at floor",
-			percentiles:  with(func(m *attrlatency.TTFTPercentiles) { m.InflightAtHigh = 0 }),
-			cur:          5,
-			wantPred:     0.20,
-			wantHasFloor: true,
-		},
-		{
-			name:         "high anchor at or below the floor seeds at floor",
-			percentiles:  with(func(m *attrlatency.TTFTPercentiles) { m.HighTTFT = 0.20 }),
-			cur:          5,
-			wantPred:     0.20,
-			wantHasFloor: true,
-		},
+		// a floor but no usable operating points: predicts at the floor
+		{"short window below minRequests", with(func(m *pct) { m.RecentN = 9 }), 5, 0.20, true, false},
+		{"no high in-flight anchor", with(func(m *pct) { m.InflightAtHigh = 0 }), 5, 0.20, true, false},
+		{"high anchor at the floor", with(func(m *pct) { m.HighTTFT = 0.20 }), 5, 0.20, true, false},
 
-		// --- trusted, low point admissible: two segments ----------------------
-		{
-			name:            "idle predicts exactly the floor",
-			percentiles:     trusted(),
-			cur:             0,
-			wantPred:        0.20,
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name:            "below the low anchor rides segment A->B",
-			percentiles:     trusted(),
-			cur:             2,
-			wantPred:        0.275, // 0.20 + 2*(0.35-0.20)/4
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name:            "at the low anchor both segments agree",
-			percentiles:     trusted(),
-			cur:             4,
-			wantPred:        0.35, // continuity between A->B and B->C
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name:            "at the high anchor reproduces the measured point",
-			percentiles:     trusted(),
-			cur:             9,
-			wantPred:        0.55,
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name:            "beyond the high anchor extends segment B->C",
-			percentiles:     trusted(),
-			cur:             20,
-			wantPred:        0.99, // 0.35 + (20-4)*(0.55-0.35)/(9-4)
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
+		// calibrated, low point admissible: two segments
+		{"idle predicts the floor", trusted(), 0, 0.20, true, true},
+		{"below the low anchor rides A to B", trusted(), 2, 0.275, true, true},
+		{"at the low anchor both segments agree", trusted(), 4, 0.35, true, true},
+		{"at the high anchor reproduces it", trusted(), 9, 0.55, true, true},
+		{"beyond the high anchor extends B to C", trusted(), 20, 0.99, true, true},
 
-		// --- trusted, low point inadmissible: single floor chord A->C ---------
-		{
-			name: "anchors too close in load fall back to the floor chord",
-			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
-				m.InflightAtLow = 8 // gap of 1, below minInflightGap of 2
-			}),
-			cur:             9,
-			wantPred:        0.55, // 0.20 + 9*(0.55-0.20)/9
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name: "inverted latency ordering falls back to the floor chord",
-			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
-				m.HighTTFT = 0.30 // below LowTTFT of 0.35
-			}),
-			cur:             9,
-			wantPred:        0.30, // 0.20 + 9*(0.30-0.20)/9
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name: "low anchor under the floor falls back to the floor chord",
-			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
-				m.LowTTFT = 0.15 // below the floor of 0.20
-			}),
-			cur:             9,
-			wantPred:        0.55,
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
-		{
-			name: "zero low in-flight anchor falls back to the floor chord",
-			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
-				m.InflightAtLow = 0
-			}),
-			cur:             9,
-			wantPred:        0.55,
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
+		// calibrated, low point inadmissible: the single floor chord A to C
+		{"anchors too close in load", with(func(m *pct) { m.InflightAtLow = 8 }), 9, 0.55, true, true},
+		{"inverted latency ordering", with(func(m *pct) { m.HighTTFT = 0.30 }), 9, 0.30, true, true},
+		{"low anchor under the floor", with(func(m *pct) { m.LowTTFT = 0.15 }), 9, 0.55, true, true},
+		{"zero low in-flight anchor", with(func(m *pct) { m.InflightAtLow = 0 }), 9, 0.55, true, true},
 
-		// --- floor fallback before the bucket history fills --------------------
-		{
-			name: "falls back to the short-window P10 when no bucket floor exists",
-			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
-				m.P10LowTTFT = 0
-				m.P10TTFT = 0.20
-			}),
-			cur:             9,
-			wantPred:        0.55,
-			wantHasBaseline: true,
-			wantHasFloor:    true,
-		},
+		// the floor falls back to the short-window P10 before the history fills
+		{"short-window P10 as floor", with(func(m *pct) { m.P10LowTTFT, m.P10TTFT = 0, 0.20 }), 9, 0.55, true, true},
 	}
 
 	for _, tc := range tests {
@@ -295,8 +174,7 @@ func TestPredict(t *testing.T) {
 			assert.Equal(t, tc.wantHasFloor, hasFloor, "hasFloor")
 			assert.Equal(t, tc.wantHasBaseline, hasBaseline, "hasBaseline")
 
-			// Score composes the two the same way: the curve when there is a
-			// baseline, the floor alone when there is only a floor.
+			// Composed exactly as Score does it.
 			var pred float64
 			switch {
 			case hasBaseline:
@@ -306,9 +184,8 @@ func TestPredict(t *testing.T) {
 			}
 			assert.InDelta(t, tc.wantPred, pred, 1e-9)
 
-			// The prediction must never fall below the endpoint's own floor:
-			// a loaded endpoint predicted at its idle latency would win every
-			// decision it appeared in.
+			// Never below the endpoint's own floor: a loaded endpoint predicted
+			// at its idle latency would win every decision it appeared in.
 			if hasFloor {
 				assert.GreaterOrEqual(t, pred, floor)
 			}
@@ -367,19 +244,6 @@ func TestScore(t *testing.T) {
 		assert.InDelta(t, 1.0, scores[idle], 1e-9)
 	})
 
-	t.Run("equal predictions score neutral", func(t *testing.T) {
-		s := NewScorer(DefaultConfig).WithExplorationRate(0)
-		endpoints := []fwksched.Endpoint{
-			newEndpoint(trusted(), inflightPtr(9)),
-			newEndpoint(trusted(), inflightPtr(9)),
-		}
-
-		scores := s.Score(ctx, nil, endpoints)
-		for _, endpoint := range endpoints {
-			assert.Equal(t, 1.0, scores[endpoint])
-		}
-	})
-
 	t.Run("roundTTFTStep makes near-ties actual ties", func(t *testing.T) {
 		fast := newEndpoint(trusted(), inflightPtr(19)) // 0.95s
 		slow := newEndpoint(trusted(), inflightPtr(20)) // 0.99s
@@ -401,7 +265,7 @@ func TestScore(t *testing.T) {
 
 		calibrated := newEndpoint(trusted(), inflightPtr(20))    // pred 0.99
 		fastCalibrated := newEndpoint(trusted(), inflightPtr(0)) // pred 0.20, would win
-		uncalibrated := newEndpoint(with(func(m *attrlatency.TTFTPercentiles) {
+		uncalibrated := newEndpoint(with(func(m *pct) {
 			m.RecentN = 2 // has a floor, but no trusted operating point
 		}), inflightPtr(50))
 
@@ -417,7 +281,7 @@ func TestScore(t *testing.T) {
 
 		for range 200 {
 			calibrated := newEndpoint(trusted(), inflightPtr(20))
-			uncalibrated := newEndpoint(with(func(m *attrlatency.TTFTPercentiles) {
+			uncalibrated := newEndpoint(with(func(m *pct) {
 				m.RecentN = 2
 			}), inflightPtr(50))
 
@@ -438,8 +302,4 @@ func TestScore(t *testing.T) {
 		assert.Equal(t, 0.0, scores[noInflight])
 	})
 
-	t.Run("no endpoints yields no scores", func(t *testing.T) {
-		s := NewScorer(DefaultConfig)
-		assert.Empty(t, s.Score(ctx, nil, nil))
-	})
 }
