@@ -130,10 +130,10 @@ func (s *endpointState) rollBucket(now time.Time, cfg resolvedConfig) {
 	if bucket := s.tracker.window(now, cfg.bucketDuration, 0); len(bucket) > 0 {
 		s.bucketP10s = append(s.bucketP10s, percentileOf(bucket, 0.10))
 		// Sorted here because the percentile needs it anyway, which also puts
-		// the extremes at the ends for dropMinMax.
+		// the slowest bucket at the end for dropMax.
 		sort.Float64s(s.bucketP10s)
 		if len(s.bucketP10s) > cfg.bucketHistorySize {
-			s.bucketP10s = dropMinMax(s.bucketP10s)
+			s.bucketP10s = dropMax(s.bucketP10s)
 		}
 		s.p10Low = percentileFloat64(s.bucketP10s, 0.10)
 	}

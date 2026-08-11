@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package ttftaware
+package latencyobservation
 
 import (
 	"context"
@@ -149,12 +149,12 @@ func TestPredict(t *testing.T) {
 	s := NewScorer(DefaultConfig)
 
 	tests := []struct {
-		name         string
-		percentiles  *attrlatency.TTFTPercentiles
-		cur          float64
-		wantPred     float64
-		wantTrusted  bool
-		wantObserved bool
+		name            string
+		percentiles     *attrlatency.TTFTPercentiles
+		cur             float64
+		wantPred        float64
+		wantHasBaseline bool
+		wantHasFloor    bool
 	}{
 		// --- cold: no usable floor -------------------------------------------
 		{
@@ -174,63 +174,63 @@ func TestPredict(t *testing.T) {
 			percentiles:  with(func(m *attrlatency.TTFTPercentiles) { m.RecentN = 9 }),
 			cur:          5,
 			wantPred:     0.20,
-			wantObserved: true,
+			wantHasFloor: true,
 		},
 		{
 			name:         "no high in-flight anchor seeds at floor",
 			percentiles:  with(func(m *attrlatency.TTFTPercentiles) { m.InflightAtHigh = 0 }),
 			cur:          5,
 			wantPred:     0.20,
-			wantObserved: true,
+			wantHasFloor: true,
 		},
 		{
 			name:         "high anchor at or below the floor seeds at floor",
 			percentiles:  with(func(m *attrlatency.TTFTPercentiles) { m.HighTTFT = 0.20 }),
 			cur:          5,
 			wantPred:     0.20,
-			wantObserved: true,
+			wantHasFloor: true,
 		},
 
 		// --- trusted, low point admissible: two segments ----------------------
 		{
-			name:         "idle predicts exactly the floor",
-			percentiles:  trusted(),
-			cur:          0,
-			wantPred:     0.20,
-			wantTrusted:  true,
-			wantObserved: true,
+			name:            "idle predicts exactly the floor",
+			percentiles:     trusted(),
+			cur:             0,
+			wantPred:        0.20,
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
-			name:         "below the low anchor rides segment A->B",
-			percentiles:  trusted(),
-			cur:          2,
-			wantPred:     0.275, // 0.20 + 2*(0.35-0.20)/4
-			wantTrusted:  true,
-			wantObserved: true,
+			name:            "below the low anchor rides segment A->B",
+			percentiles:     trusted(),
+			cur:             2,
+			wantPred:        0.275, // 0.20 + 2*(0.35-0.20)/4
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
-			name:         "at the low anchor both segments agree",
-			percentiles:  trusted(),
-			cur:          4,
-			wantPred:     0.35, // continuity between A->B and B->C
-			wantTrusted:  true,
-			wantObserved: true,
+			name:            "at the low anchor both segments agree",
+			percentiles:     trusted(),
+			cur:             4,
+			wantPred:        0.35, // continuity between A->B and B->C
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
-			name:         "at the high anchor reproduces the measured point",
-			percentiles:  trusted(),
-			cur:          9,
-			wantPred:     0.55,
-			wantTrusted:  true,
-			wantObserved: true,
+			name:            "at the high anchor reproduces the measured point",
+			percentiles:     trusted(),
+			cur:             9,
+			wantPred:        0.55,
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
-			name:         "beyond the high anchor extends segment B->C",
-			percentiles:  trusted(),
-			cur:          20,
-			wantPred:     0.99, // 0.35 + (20-4)*(0.55-0.35)/(9-4)
-			wantTrusted:  true,
-			wantObserved: true,
+			name:            "beyond the high anchor extends segment B->C",
+			percentiles:     trusted(),
+			cur:             20,
+			wantPred:        0.99, // 0.35 + (20-4)*(0.55-0.35)/(9-4)
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 
 		// --- trusted, low point inadmissible: single floor chord A->C ---------
@@ -239,40 +239,40 @@ func TestPredict(t *testing.T) {
 			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
 				m.InflightAtLow = 8 // gap of 1, below minInflightGap of 2
 			}),
-			cur:          9,
-			wantPred:     0.55, // 0.20 + 9*(0.55-0.20)/9
-			wantTrusted:  true,
-			wantObserved: true,
+			cur:             9,
+			wantPred:        0.55, // 0.20 + 9*(0.55-0.20)/9
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
 			name: "inverted latency ordering falls back to the floor chord",
 			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
 				m.HighTTFT = 0.30 // below LowTTFT of 0.35
 			}),
-			cur:          9,
-			wantPred:     0.30, // 0.20 + 9*(0.30-0.20)/9
-			wantTrusted:  true,
-			wantObserved: true,
+			cur:             9,
+			wantPred:        0.30, // 0.20 + 9*(0.30-0.20)/9
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
 			name: "low anchor under the floor falls back to the floor chord",
 			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
 				m.LowTTFT = 0.15 // below the floor of 0.20
 			}),
-			cur:          9,
-			wantPred:     0.55,
-			wantTrusted:  true,
-			wantObserved: true,
+			cur:             9,
+			wantPred:        0.55,
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 		{
 			name: "zero low in-flight anchor falls back to the floor chord",
 			percentiles: with(func(m *attrlatency.TTFTPercentiles) {
 				m.InflightAtLow = 0
 			}),
-			cur:          9,
-			wantPred:     0.55,
-			wantTrusted:  true,
-			wantObserved: true,
+			cur:             9,
+			wantPred:        0.55,
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 
 		// --- floor fallback before the bucket history fills --------------------
@@ -282,26 +282,35 @@ func TestPredict(t *testing.T) {
 				m.P10LowTTFT = 0
 				m.P10TTFT = 0.20
 			}),
-			cur:          9,
-			wantPred:     0.55,
-			wantTrusted:  true,
-			wantObserved: true,
+			cur:             9,
+			wantPred:        0.55,
+			wantHasBaseline: true,
+			wantHasFloor:    true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pred, isTrusted, isObserved := s.predict(tc.percentiles, tc.cur)
+			floor, hasFloor, hasBaseline := calibration(tc.percentiles)
+			assert.Equal(t, tc.wantHasFloor, hasFloor, "hasFloor")
+			assert.Equal(t, tc.wantHasBaseline, hasBaseline, "hasBaseline")
 
+			// Score composes the two the same way: the curve when there is a
+			// baseline, the floor alone when there is only a floor.
+			var pred float64
+			switch {
+			case hasBaseline:
+				pred = s.predict(tc.percentiles, floor, tc.cur)
+			case hasFloor:
+				pred = floor
+			}
 			assert.InDelta(t, tc.wantPred, pred, 1e-9)
-			assert.Equal(t, tc.wantTrusted, isTrusted, "trusted")
-			assert.Equal(t, tc.wantObserved, isObserved, "observed")
 
 			// The prediction must never fall below the endpoint's own floor:
 			// a loaded endpoint predicted at its idle latency would win every
 			// decision it appeared in.
-			if isObserved {
-				assert.GreaterOrEqual(t, pred, tc.percentiles.Floor())
+			if hasFloor {
+				assert.GreaterOrEqual(t, pred, floor)
 			}
 		})
 	}
@@ -311,10 +320,12 @@ func TestPredict(t *testing.T) {
 // predict a faster response, or the most loaded endpoint wins.
 func TestPredictIsMonotoneInLoad(t *testing.T) {
 	s := NewScorer(DefaultConfig)
+	floor, _, hasBaseline := calibration(trusted())
+	require.True(t, hasBaseline)
+
 	prev := 0.0
 	for cur := 0.0; cur <= 50; cur += 0.5 {
-		pred, isTrusted, _ := s.predict(trusted(), cur)
-		require.True(t, isTrusted)
+		pred := s.predict(trusted(), floor, cur)
 		assert.GreaterOrEqual(t, pred, prev, "prediction dropped at in-flight %v", cur)
 		prev = pred
 	}

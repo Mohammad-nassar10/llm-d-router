@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package ttftaware routes each request to the endpoint with the lowest
+// Package latencyobservation routes each request to the endpoint with the lowest
 // predicted time-to-first-token under its current load. The prediction is a
 // piecewise-linear curve through the endpoint's measured points, evaluated at
 // its live in-flight count. See README.md for the curve and its rationale.
-package ttftaware
+package latencyobservation
 
 import (
 	"context"
@@ -36,8 +36,8 @@ import (
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
-// ScorerType is the plugin type of the TTFT-aware scorer.
-const ScorerType = "ttft-aware-scorer"
+// ScorerType is the plugin type of the latency-observation scorer.
+const ScorerType = "latency-observation-scorer"
 
 const (
 	// Non-zero: at zero an uncalibrated endpoint is seeded at the best observed
@@ -171,9 +171,19 @@ func (s *Scorer) Consumes() fwkplugin.DataDependencies {
 
 // eval is the per-endpoint working state for one Score call.
 type eval struct {
-	pred     float64
-	trusted  bool // has a calibrated operating point
-	observed bool // has a service floor, i.e. is not cold
+	pred        float64
+	hasBaseline bool // operating points usable, so the full curve applies
+	hasFloor    bool // has a service floor, i.e. is not cold
+}
+
+// calibration reports what the snapshot alone says is known about an endpoint,
+// independent of any prediction.
+func calibration(m *attrlatency.TTFTPercentiles) (floor float64, hasFloor, hasBaseline bool) {
+	floor = m.Floor()
+	if floor == 0 {
+		return 0, false, false
+	}
+	return floor, true, m.RecentN >= m.MinRequests && m.InflightAtHigh > 0 && m.HighTTFT > floor
 }
 
 // Score ranks endpoints by predicted TTFT, min-max normalized so the lowest
@@ -186,26 +196,32 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 
 	for i, endpoint := range endpoints {
 		percentiles, inflight, hasInflight := s.read(endpoint)
+		floor, hasFloor, hasBaseline := calibration(percentiles)
 
-		pred, trusted, observed := s.predict(percentiles, inflight)
-		// No live load reading means the curve was evaluated at an unknown
+		// No live load reading means the curve would be evaluated at an unknown
 		// point, so route the endpoint through exploration rather than let it
 		// compete on an unanchored value.
-		if !hasInflight {
-			trusted = false
+		hasBaseline = hasBaseline && hasInflight
+
+		var pred float64
+		switch {
+		case hasBaseline:
+			pred = s.predict(percentiles, floor, inflight)
+		case hasFloor:
+			pred = floor // uncalibrated: the floor is an optimistic seed
 		}
 		if s.roundTTFTStep > 0 {
 			pred = math.Round(pred/s.roundTTFTStep) * s.roundTTFTStep
 		}
 
-		evals[i] = eval{pred: pred, trusted: trusted, observed: observed}
-		if observed {
+		evals[i] = eval{pred: pred, hasBaseline: hasBaseline, hasFloor: hasFloor}
+		if hasFloor {
 			anyObserved = true
 			minPred = min(minPred, pred)
 			// Cold endpoints are seeded to minPred below, so they can never be the max.
 			maxPred = max(maxPred, pred)
 		}
-		if trusted {
+		if hasBaseline {
 			anyTrusted = true
 		}
 	}
@@ -223,7 +239,7 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 
 	for i, endpoint := range endpoints {
 		e := &evals[i]
-		if !e.observed {
+		if !e.hasFloor {
 			e.pred = minPred // optimistic seed for a cold endpoint
 		}
 		if maxPred == minPred {
@@ -234,7 +250,7 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 
 		// Independent coin per under-observed endpoint. Overrides the final
 		// score only, so a probe never distorts the normalization above.
-		if s.explorationRate > 0 && !e.trusted {
+		if s.explorationRate > 0 && !e.hasBaseline {
 			if rand.Float64() < s.explorationRate {
 				scores[endpoint] = 1.0
 			} else if anyTrusted {
@@ -245,12 +261,12 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 
 	if debugLogger := log.FromContext(ctx).V(logutil.DEBUG); debugLogger.Enabled() {
 		for i, endpoint := range endpoints {
-			debugLogger.Info("ttft-aware score",
+			debugLogger.Info("latency-observation score",
 				"endpoint", endpoint.GetMetadata().ID.String(),
 				"predictedTTFT", evals[i].pred,
 				"score", scores[endpoint],
-				"trusted", evals[i].trusted,
-				"observed", evals[i].observed)
+				"hasBaseline", evals[i].hasBaseline,
+				"hasFloor", evals[i].hasFloor)
 		}
 	}
 
@@ -276,21 +292,13 @@ func (s *Scorer) read(endpoint fwksched.Endpoint) (percentiles *attrlatency.TTFT
 }
 
 // predict evaluates the endpoint's TTFT-vs-load curve at cur, its live
-// in-flight count, and reports whether it is trusted (calibrated) and observed
-// (has a floor). The curve runs through A (0, floor), B (InflightAtLow,
+// in-flight count. The curve runs through A (0, floor), B (InflightAtLow,
 // LowTTFT) and C (InflightAtHigh, HighTTFT); every point is measured. See
 // README.md for why three points rather than two.
 //
-// Cold returns (0, false, false); observed but uncalibrated returns the floor.
-func (s *Scorer) predict(m *attrlatency.TTFTPercentiles, cur float64) (pred float64, trusted, observed bool) {
-	floor := m.Floor()
-	if floor == 0 {
-		return 0, false, false
-	}
-	if !(m.RecentN >= m.MinRequests && m.InflightAtHigh > 0 && m.HighTTFT > floor) {
-		return floor, false, true
-	}
-
+// Only meaningful for an endpoint with a baseline; callers use the floor alone
+// otherwise.
+func (s *Scorer) predict(m *attrlatency.TTFTPercentiles, floor, cur float64) (pred float64) {
 	// The low point is admissible only when it is separated from the high point
 	// in load, ordered below it in latency, and above the floor. Otherwise its
 	// segment slopes on noise, or downwards.
@@ -312,5 +320,5 @@ func (s *Scorer) predict(m *attrlatency.TTFTPercentiles, cur float64) (pred floa
 		// Low point inadmissible: the single floor chord A->C, extended beyond C.
 		pred = floor + cur*(m.HighTTFT-floor)/m.InflightAtHigh
 	}
-	return max(pred, floor), true, true
+	return max(pred, floor)
 }

@@ -1,4 +1,4 @@
-# TTFT-Aware Scorer (`ttft-aware-scorer`)
+# Latency Observation Scorer (`latency-observation-scorer`)
 
 
 Routes each request to the endpoint with the lowest predicted TTFT under current load.
@@ -124,7 +124,7 @@ and ties for the win, taking a share of all traffic before anything is known abo
 
 ```yaml
 plugins:
-  - type: ttft-aware-scorer
+  - type: latency-observation-scorer
     name: ttft
     parameters:
       explorationRate: 0.1

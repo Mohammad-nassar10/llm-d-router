@@ -3,13 +3,13 @@
 
 Observes each endpoint's actual TTFTs and publishes a small `TTFTPercentiles` snapshot to the
 endpoint's attribute store every `intervalDuration`. The
-[TTFT-aware scorer](../../../scheduling/scorer/ttftaware/README.md) consumes that snapshot to predict
+[latency-observation scorer](../../../scheduling/scorer/latencyobservation/README.md) consumes that snapshot to predict
 TTFT under load; this package only measures and summarises — it carries no prediction formula of its
 own.
 
 ## Motivation
 
-The [TTFT-aware scorer](../../../scheduling/scorer/ttftaware/README.md) routes each request to
+The [latency-observation scorer](../../../scheduling/scorer/latencyobservation/README.md) routes each request to
 whichever endpoint is predicted to give the best TTFT under its *current* load, e.g. offloading from
 a saturated deployment to an idle one. To predict TTFT at an arbitrary load it interpolates between
 a handful of anchor points: an estimated load-invariant floor, plus TTFT/in-flight pairs at two
@@ -79,13 +79,14 @@ depth, so a low percentile of TTFT recovers the hardware-bound prefill floor. Co
 
 - once per `bucketDuration`, record the **P10 TTFT of that bucket** into a bounded history;
 - `P10Low` is the **P10 of that history**;
-- when the history is full (`bucketHistorySize` entries) the **smallest and largest** entries are
-  evicted — not the oldest — so a single anomalously fast or slow bucket never sticks.
+- when the history is full (`bucketHistorySize` entries) the **largest** entry is evicted — not the
+  oldest — so a single anomalously slow bucket never sticks.
 
 Because the history spans both idle and busy buckets, taking a low percentile of it locks onto the
-idle buckets (the true floor) instead of drifting up with recent load — it is load-invariant. The
-trade-off of evicting by value rather than age is that the floor adapts to a permanent shift only
-gradually, and drifts upward over long runs.
+idle buckets (the true floor) instead of drifting up with recent load — it is load-invariant. Only
+the slowest entry is evicted: the floor is already a low percentile of this history, so dropping
+the fastest as well would discard the samples it reads and let it drift upward through a long
+high-load period.
 
 ### Sample guard
 
@@ -108,7 +109,7 @@ then sends it calibration probes until it crosses `MinRequests`.
 | `highPercentile` | 50 | High operating-anchor percentile (`HighTTFT` / `InflightAtHigh`); must satisfy `0 < low < high < 100` |
 | `windowSize` | 5000 | Ring buffer capacity per endpoint, allocated up front (~200 KB) |
 | `bucketDuration` | 1m | Window for each floor-history entry's P10; keep `<= maxObservationAge` |
-| `bucketHistorySize` | 1000 | Per-bucket P10s kept for the floor; smallest/largest evicted by value when full. Must be >= 2 |
+| `bucketHistorySize` | 1000 | Per-bucket P10s kept for the floor; the slowest is evicted when full. Must be >= 2 |
 | `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default producer |
 
 ## Configuration
@@ -125,11 +126,11 @@ plugins:
       minRequests: 10
       bucketDuration: 1m
       bucketHistorySize: 1000
-  - type: ttft-aware-scorer
+  - type: latency-observation-scorer
     name: ttft
     parameters:
       ttftPercentilesProducerName: ttft-observer
 ```
 
-See the [scorer README](../../../scheduling/scorer/ttftaware/README.md) for the prediction model and
+See the [scorer README](../../../scheduling/scorer/latencyobservation/README.md) for the prediction model and
 an end-to-end pipeline.

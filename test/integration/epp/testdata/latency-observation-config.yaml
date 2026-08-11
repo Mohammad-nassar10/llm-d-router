@@ -19,7 +19,7 @@ plugins:
       highPercentile: 50
       bucketDuration: 100ms
       bucketHistorySize: 2
-  - type: ttft-aware-scorer
+  - type: latency-observation-scorer
     name: ttft
     parameters:
       explorationRate: 0

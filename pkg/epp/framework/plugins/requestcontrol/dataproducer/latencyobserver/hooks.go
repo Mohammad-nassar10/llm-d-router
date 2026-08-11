@@ -100,17 +100,21 @@ func readInFlightRequests(endpoint fwksched.Endpoint, key fwkplugin.DataKey) int
 
 // PreRequest records the dispatch — which endpoint won, what it was carrying,
 // when the request left — for ResponseBody to turn into a TTFT.
-func (p *Observer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
+//
+// Always returns nil: a returned error fails the request, and failing to record
+// an observation is never a reason to reject one.
+func (p *Observer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) error {
 	endpoint := primaryTarget(result)
 	if request == nil || request.RequestID == "" || endpoint == nil {
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Skipping TTFT tracking: no request ID or no primary target")
-		return
+		return nil
 	}
 	p.PluginState.Write(request.RequestID, dispatchStateKey, &dispatchInfo{
 		endpointID:   endpoint.GetMetadata().ID.String(),
 		inflight:     readInFlightRequests(endpoint, p.inflightAtDispatchDataKey),
 		dispatchedAt: time.Now(),
 	})
+	return nil
 }
 
 // primaryTarget returns the endpoint the primary profile selected, or nil. TTFT

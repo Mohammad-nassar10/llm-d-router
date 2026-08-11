@@ -105,15 +105,14 @@ func percentileFloat64(sorted []float64, p float64) float64 {
 	return sorted[lo] + (idx-float64(lo))*(sorted[lo+1]-sorted[lo])
 }
 
-// dropMinMax removes the smallest and largest entries from a value-sorted slice,
-// reusing the backing array. It is the floor history's eviction policy: when the
-// per-bucket P10 history is full, the extreme buckets are dropped rather than the
-// oldest, so a single anomalously fast or slow bucket never sticks in the history.
-func dropMinMax(sorted []float64) []float64 {
-	if len(sorted) < 2 {
+// dropMax removes the largest entry from a value-sorted slice. When the
+// per-bucket P10 history is full the slowest bucket is dropped rather than the
+// oldest, so one anomalously slow bucket never sticks.
+func dropMax(sorted []float64) []float64 {
+	if len(sorted) == 0 {
 		return sorted
 	}
-	return sorted[:copy(sorted, sorted[1:len(sorted)-1])]
+	return sorted[:len(sorted)-1]
 }
 
 // bandInflight averages the in-flight counts in the [p-0.1, p+0.1] band of a
