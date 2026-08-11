@@ -40,6 +40,9 @@ depending on registration order. `Produce` is DAG-ordered, so the captured value
 The snapshot is exposed through a `DynamicAttribute` attached once per endpoint, so each flush swaps
 a pointer rather than writing the attribute map.
 
+> **Note:** intended for EPP hub deployments, which route across peer clusters rather than selecting
+> model-serving endpoints.
+
 ## Streaming responses only
 
 A time-to-first-token exists only when the response arrives in chunks. If the whole body comes back

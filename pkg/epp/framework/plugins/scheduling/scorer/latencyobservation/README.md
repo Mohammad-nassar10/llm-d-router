@@ -12,6 +12,9 @@ in-flight count from `inflight-load-producer`, and turns them into a prediction 
 Both inputs are declared `Required`, so configuring the scorer alone auto-creates the observer, which
 in turn auto-creates `inflight-load-producer`.
 
+> **Note:** intended for EPP hub deployments, which route across peer clusters rather than selecting
+> model-serving endpoints.
+
 ## Prediction — `predictedTTFT`
 
 Every endpoint has a latency curve: how long a new request waits as a function of how many requests
