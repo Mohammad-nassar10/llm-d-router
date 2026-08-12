@@ -18,73 +18,63 @@ package latencyobserver
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 )
 
-// flushLoop recomputes every endpoint's snapshot until ctx is cancelled; one
-// goroutine serves all endpoints.
-//
-// It runs here rather than in a request hook so no request pays for it, and so
-// an endpoint that stops receiving traffic still ages its window out instead of
-// freezing on a stale snapshot.
-func (p *Observer) flushLoop(ctx context.Context) {
-	ticker := time.NewTicker(p.cfg.interval)
-	defer ticker.Stop()
+// Interval is the cadence at which the datalayer calls Dispatch.
+func (p *Observer) Interval() time.Duration { return p.cfg.interval }
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			p.flushAll(ctx, now)
-		}
-	}
+// AppendExtractor rejects extractors: this dispatcher publishes its own state
+// rather than sourcing data for others, the shape cross-replica-publisher uses.
+// The caller names both plugins when it wraps this error.
+func (p *Observer) AppendExtractor(fwkplugin.Plugin) error {
+	return errors.New("latency observer does not accept extractors")
 }
 
-// flushAll recomputes and publishes every endpoint's snapshot. The endpoint set
-// is snapshotted under a read lock and released before any flush runs, so a
-// slow recompute never blocks an endpoint appearing or disappearing.
-func (p *Observer) flushAll(ctx context.Context, now time.Time) {
-	type entry struct {
-		id    string
-		state *endpointState
+// Dispatch recomputes and publishes one endpoint's snapshot. The datalayer's
+// collector calls it once per Interval, for each endpoint.
+//
+// An endpoint that stops receiving traffic is still visited, so its window ages
+// out rather than freezing on a stale snapshot.
+func (p *Observer) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
+	if ep == nil || ep.GetMetadata() == nil {
+		return nil
 	}
+	id := ep.GetMetadata().ID.String()
+	p.publish(ctx, id, p.stateFor(id), time.Now())
+	return nil
+}
 
-	p.mu.RLock()
-	entries := make([]entry, 0, len(p.state))
-	for id, state := range p.state {
-		entries = append(entries, entry{id: id, state: state})
-	}
-	p.mu.RUnlock()
+// publish recomputes one endpoint's snapshot and swaps it in.
+//
+// The anchors are otherwise only visible through StateDumper, which the
+// standalone file-discovery mode does not serve, so this log is the only way to
+// see them in a multi-cluster hub.
+func (p *Observer) publish(ctx context.Context, id string, state *endpointState, now time.Time) {
+	snapshot := state.flush(now, p.cfg)
+	state.published.Store(snapshot)
 
-	// The published anchors are otherwise only visible through StateDumper,
-	// which the standalone file-discovery mode does not serve — so this log is
-	// the only way to see them in a multi-cluster hub.
-	debugLogger := log.FromContext(ctx).V(logutil.DEBUG)
-
-	for _, e := range entries {
-		snapshot := e.state.flush(now, p.cfg)
-		e.state.published.Store(snapshot)
-
-		if debugLogger.Enabled() {
-			debugLogger.Info("ttft-percentiles published",
-				"endpoint", e.id,
-				"floorSeconds", snapshot.Floor(),
-				"p10LowSeconds", snapshot.P10LowTTFT,
-				"lowSeconds", snapshot.LowTTFT,
-				"highSeconds", snapshot.HighTTFT,
-				"inflightAtLow", snapshot.InflightAtLow,
-				"inflightAtHigh", snapshot.InflightAtHigh,
-				"recentN", snapshot.RecentN,
-				"observations", snapshot.Observations,
-				"minRequests", snapshot.MinRequests)
-		}
+	if debugLogger := log.FromContext(ctx).V(logutil.DEBUG); debugLogger.Enabled() {
+		debugLogger.Info("ttft-percentiles published",
+			"endpoint", id,
+			"floorSeconds", snapshot.Floor(),
+			"longTermFloorSeconds", snapshot.FloorTTFT,
+			"lowLoadSeconds", snapshot.LowLoadTTFT,
+			"typicalLoadSeconds", snapshot.TypicalLoadTTFT,
+			"inflightAtLowLoad", snapshot.InflightAtLowLoad,
+			"inflightAtTypicalLoad", snapshot.InflightAtTypicalLoad,
+			"recentRequestCount", snapshot.RecentRequestCount,
+			"observations", snapshot.Observations,
+			"calibrationThreshold", snapshot.CalibrationThreshold)
 	}
 }
 
@@ -99,20 +89,20 @@ func (s *endpointState) flush(now time.Time, cfg resolvedConfig) *attrlatency.TT
 
 	short := s.tracker.window(now, cfg.maxObservationAge, cfg.maxRequests)
 	snapshot := &attrlatency.TTFTPercentiles{
-		RecentN:      len(short),
-		Observations: s.observations,
-		MinRequests:  cfg.minRequests,
+		RecentRequestCount:   len(short),
+		Observations:         s.observations,
+		CalibrationThreshold: cfg.minRequests,
 	}
 	if len(short) > 0 {
-		snapshot.P10TTFT = percentileOf(short, 0.10)
-		snapshot.LowTTFT = percentileOf(short, cfg.lowPercentile)
-		snapshot.HighTTFT = percentileOf(short, cfg.highPercentile)
-		snapshot.InflightAtLow = bandInflight(short, cfg.lowPercentile)
-		snapshot.InflightAtHigh = bandInflight(short, cfg.highPercentile)
+		snapshot.WindowFloorTTFT = percentileOf(short, 0.10)
+		snapshot.LowLoadTTFT = percentileOf(short, cfg.lowPercentile)
+		snapshot.TypicalLoadTTFT = percentileOf(short, cfg.typicalPercentile)
+		snapshot.InflightAtLowLoad = bandInflight(short, cfg.lowPercentile)
+		snapshot.InflightAtTypicalLoad = bandInflight(short, cfg.typicalPercentile)
 	}
 
 	s.rollBucket(now, cfg)
-	snapshot.P10LowTTFT = s.p10Low
+	snapshot.FloorTTFT = s.floor
 	return snapshot
 }
 
@@ -135,7 +125,7 @@ func (s *endpointState) rollBucket(now time.Time, cfg resolvedConfig) {
 		if len(s.bucketP10s) > cfg.bucketHistorySize {
 			s.bucketP10s = dropMax(s.bucketP10s)
 		}
-		s.p10Low = percentileFloat64(s.bucketP10s, 0.10)
+		s.floor = percentileFloat64(s.bucketP10s, 0.10)
 	}
 	s.bucketStart = now
 }

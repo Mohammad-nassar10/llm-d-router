@@ -1,47 +1,62 @@
-# Latency Observer Producer (`latency-observer-producer`)
+# Latency Observer Producer
 
+**Type:** `latency-observer-producer`
 
-Observes each endpoint's actual TTFTs and publishes a small `TTFTPercentiles` snapshot to the
-endpoint's attribute store every `intervalDuration`. The
-[latency-observation scorer](../../../scheduling/scorer/latencyobservation/README.md) consumes that snapshot to predict
-TTFT under load; this package only measures and summarises — it carries no prediction formula of its
-own.
+A black-box observer that produces latency data for a black-box latency scorer.
+It tracks requests and responses and publishes a small latency snapshot of TTFT percentiles that the
+scorer components use.
+It does not depend on polling data from the endpoints.
 
 ## Motivation
 
-The [latency-observation scorer](../../../scheduling/scorer/latencyobservation/README.md) routes each request to
-whichever endpoint is predicted to give the best TTFT under its *current* load, e.g. offloading from
-a saturated deployment to an idle one. To predict TTFT at an arbitrary load it interpolates between
-a handful of anchor points: an estimated load-invariant floor, plus TTFT/in-flight pairs at two
-operating percentiles. This producer exists to measure and publish exactly those anchor points, so
-measurement and prediction stay in separate packages.
+Expected latency is an important factor in picking the endpoint for serving a request. To support
+weighting latency in the decision, the
+[latency-observation scorer](../../../scheduling/scorer/latencyobservation/README.md) provides a
+relative score to every endpoint based on a TTFT latency prediction under its *current* load.
+The scorer uses a TTFT latency curve that takes into account how many requests are already in flight
+when a new one arrives, interpolating linearly between measured load points.
+The producer's job is to find the anchor points based on the observed request traffic. It computes
+three anchor points — a floor, a low-load and a typical-load latency data point — for the scorer to
+interpolate between when predicting the current request's TTFT.
 
-Unlike every other load-aware signal in EPP, nothing here is scraped from the endpoint — the only
-input is the endpoint's own response. That is what lets it rank endpoints that expose no metrics at
-all.
+The black-box approach supports cases where scraping metrics from the endpoints is not feasible.
 
-## How it works
+## Architecture
 
-EPP has no data source that watches traffic, so measurement happens in the request-control hooks
-while the result is published as a datalayer attribute:
+The data producer adopts an observer pattern, passively collecting metrics about the request/response
+traffic. It captures latency in a sliding window and computes window-based percentiles for the
+scorer.
+It builds on the request-control hooks and publishes statistics as a datalayer attribute:
 
 | hook | what it does |
 |---|---|
-| `Produce` | records each candidate's live in-flight count, before this request is added to it |
-| `PreRequest` | the winner is known — pins its count and starts the clock |
-| `ResponseBody`, first chunk | TTFT observed; appended to that endpoint's window |
-| background ticker | every `intervalDuration`, recomputes the percentiles and publishes |
+| `Produce` | Update inflight load at the time of current request |
+| `PreRequest` | Record the endpoint decision to enable capturing endpoint statistics |
+| `ResponseBody`, first chunk | Capture TTFT and append it to that endpoint's observation window |
+| `Dispatch` | Every `intervalDuration`, recompute the percentiles and publish |
 
-In-flight is read in `Produce` rather than `PreRequest` because `InFlightLoad` is a live view of
-`inflight-load-producer`'s counters, and that producer increments them in its *own* `PreRequest`.
-Hook order between plugins is undefined, so reading there would include or exclude this very request
-depending on registration order. `Produce` is DAG-ordered, so the captured value is well defined.
+The latency producer reads the in-flight request count from the `inflight-load-producer`'s counters.
+The count is read in `Produce` rather than `PreRequest` so it reflects the load captured during the
+decision (i.e., when the scorer runs).
 
-The snapshot is exposed through a `DynamicAttribute` attached once per endpoint, so each flush swaps
-a pointer rather than writing the attribute map.
+The latency snapshot is exposed through a `DynamicAttribute` attached once per endpoint, so each
+flush swaps a pointer rather than writing the attribute map.
 
-> **Note:** intended for EPP hub deployments, which route across peer clusters rather than selecting
-> model-serving endpoints.
+### What drives the recompute
+
+The producer implements `PollingDispatcher`, so the datalayer's collector — which already visits every
+endpoint on a tick — calls `Dispatch` once per `intervalDuration`. The plugin owns no goroutine, no
+request pays for the recompute, and an endpoint that goes quiet is still visited, so its window ages
+out instead of freezing on a stale snapshot.
+
+Nothing is scraped: `Dispatch` only means "your turn, for this endpoint, now", and `AppendExtractor`
+is rejected because this dispatcher publishes its own state rather than sourcing data for others.
+`cross-replica-publisher` is the same shape.
+
+> **Required:** a `PollingDispatcher` is only driven when it is listed under `dataLayer.sources`.
+> Auto-creating the producer from the scorer's required data key wires the attribute but **not** the
+> tick, so its snapshot would never be published and every endpoint would read as cold. See
+> [Configuration](#configuration).
 
 ## Streaming responses only
 
@@ -53,63 +68,68 @@ A deployment whose responses are not streamed therefore produces no observations
 stays cold, and the scorer scores them all equally. That is correct, but it means the plugin
 contributes nothing there.
 
+## Percentile computation
+
+The producer collects request latencies for each endpoint. It uses a **sliding window** to keep the
+recent request TTFT latencies and the in-flight load associated with each of them.
+
+The producer computes load metrics by scanning the sliding window and filtering requests by age
+(configured by `maxObservationAge`) and by count (configured by `maxRequests`).
+Together, both keep the metrics reflecting current behaviour rather than stale measurements.
+The computed load metrics are a **low-load** latency (by default the P25 TTFT percentile) and a
+**typical-load** latency (P50 by default). For each of them the producer also records the in-flight
+load, averaged over the `[p-10, p+10]` percentile band around the percentile.
+
+Those two describe the endpoint under load. The **floor** comes from long-term statistics instead of
+recent ones. Once per `bucketDuration` the producer takes the P10 percentile of the observations in
+that bucket and stores it in a **long-term history window**, which therefore reflects the endpoint's
+latency when it is not under load. The history window is bound in size, and is trimmed by removing
+its maximal values, not its oldest ones, when full. The P10 percentile over the history window is the
+floor.
+
+Until the history window holds an entry, the P10 of the short window stands in as the floor, so an
+endpoint has a usable floor from its first flush.
+
+All three are published as one snapshot once per `intervalDuration`, so no request pays for the work
+and an endpoint that goes quiet ages its window out rather than freezing on stale anchors — while its
+long-term baseline survives the lull untouched.
+
+## Load confidence
+
+A percentile over a handful of requests is noise, so `minRequests` gates the snapshot twice: the
+floor on `Observations` (cumulative), the loaded anchors on `RecentRequestCount` (short window). Below
+the threshold the floor reads as zero, marking the endpoint cold for the scorer exploration logic;
+with a floor but too few recent requests the scorer predicts at the floor alone. The split lets a
+calibrated endpoint keep its floor through an idle spell while it re-earns the loaded anchors. Both
+counts and the threshold travel in the snapshot, so the scorer needs no parameter of its own.
+
 ## Published fields
 
 | Field | Meaning |
 |---|---|
-| `P10LowTTFT` | load-invariant service floor (see below) |
-| `P10TTFT` | 10th percentile TTFT over the short window (floor fallback) |
-| `LowTTFT`, `HighTTFT` | TTFT at the low / high operating percentiles (default P25 / P50) — the scorer's two anchors |
-| `InflightAtLow` | average in-flight-at-dispatch in the band around `lowPercentile` |
-| `InflightAtHigh` | average in-flight-at-dispatch in the band around `highPercentile` |
-| `RecentN` | observation count in the capped short window |
-| `Observations` | cumulative observations that have fed the floor (gates `Floor()`) |
-| `MinRequests` | trust threshold, copied from config so the scorer needs no separate param |
+| `FloorTTFT` | Load-invariant service floor: the P10 over the long-term history window |
+| `WindowFloorTTFT` | P10 TTFT over the short window; the floor until the history window fills |
+| `LowLoadTTFT` | TTFT at the low-load percentile (`lowPercentile`, default P25) |
+| `TypicalLoadTTFT` | TTFT at the typical-load percentile (`typicalPercentile`, default P50) |
+| `InflightAtLowLoad` | Average in-flight-at-dispatch in the band around `lowPercentile` |
+| `InflightAtTypicalLoad` | Average in-flight-at-dispatch in the band around `typicalPercentile` |
+| `RecentRequestCount` | Observation count in the capped short window |
+| `Observations` | Cumulative observations that have fed the floor (gates `Floor()`) |
+| `CalibrationThreshold` | Calibration threshold, copied from config so the scorer needs no separate param |
 
-Two internal structures produce these:
-
-**Short window** (`maxObservationAge` / `maxRequests`, kept responsive) — a value-sorted, capped,
-age-bounded snapshot of recent observations. It yields `P25`, `P50`, `P10`, and the two banded
-in-flight averages. Averaging in-flight over a percentile band rather than a single observation
-stabilises the operating-point estimate.
-
-**Bucket history** (long-term) — produces the floor.
-
-## The floor (`P10Low`)
-
-Every TTFT decomposes as `TTFT = prefill_time + queue_wait`. Prefill time does not change with queue
-depth, so a low percentile of TTFT recovers the hardware-bound prefill floor. Computing it robustly:
-
-- once per `bucketDuration`, record the **P10 TTFT of that bucket** into a bounded history;
-- `P10Low` is the **P10 of that history**;
-- when the history is full (`bucketHistorySize` entries) the **largest** entry is evicted — not the
-  oldest — so a single anomalously slow bucket never sticks.
-
-Because the history spans both idle and busy buckets, taking a low percentile of it locks onto the
-idle buckets (the true floor) instead of drifting up with recent load — it is load-invariant. Only
-the slowest entry is evicted: the floor is already a low percentile of this history, so dropping
-the fastest as well would discard the samples it reads and let it drift upward through a long
-high-load period.
-
-### Sample guard
-
-`Floor()` returns **0 until at least `MinRequests` observations have fed it**, and only then the real
-`P10Low` (or `P10` before the history fills). An endpoint with a handful of observations publishes a
-floor that is percentile-noise from cold-start requests — a genuine idle TTFT of ~0.037 s can read as
-0.56 s from two or three samples. Returning that would make a barely-observed endpoint look
-confidently slow. Returning 0 instead makes the scorer treat it as **cold**; the scorer's exploration
-then sends it calibration probes until it crosses `MinRequests`.
+`CalibrationThreshold` separates the published field from the `minRequests` parameter it copies: the
+parameter configures the threshold, the field carries it to consumers.
 
 ## Parameters
 
 | Parameter | Default | Description |
 |---|---|---|
 | `intervalDuration` | 1s | How often the snapshot is recomputed and published |
-| `maxObservationAge` | 3m | Time bound for the short window (P25 / P50 / P10) |
-| `maxRequests` | 100 | Cap the short window to the most recent N observations |
-| `minRequests` | 10 | Minimum observations before the floor and operating point are trusted |
-| `lowPercentile` | 25 | Low operating-anchor percentile (published as `LowTTFT` / `InflightAtLow`) |
-| `highPercentile` | 50 | High operating-anchor percentile (`HighTTFT` / `InflightAtHigh`); must satisfy `0 < low < high < 100` |
+| `maxObservationAge` | 3m | Time bound for the short window |
+| `maxRequests` | 100 | Cap the short window to the most recent N observations. Must be `<= windowSize` |
+| `minRequests` | 10 | Minimum observations before an anchor is calibrated; published as the snapshot's calibration threshold |
+| `lowPercentile` | 25 | Low-load anchor percentile (published as `LowLoadTTFT` / `InflightAtLowLoad`) |
+| `typicalPercentile` | 50 | Typical-load anchor percentile (`TypicalLoadTTFT` / `InflightAtTypicalLoad`); must satisfy `0 < low < typical < 100` |
 | `windowSize` | 5000 | Ring buffer capacity per endpoint, allocated up front (~200 KB) |
 | `bucketDuration` | 1m | Window for each floor-history entry's P10; keep `<= maxObservationAge` |
 | `bucketHistorySize` | 1000 | Per-bucket P10s kept for the floor; the slowest is evicted when full. Must be >= 2 |
@@ -117,8 +137,8 @@ then sends it calibration probes until it crosses `MinRequests`.
 
 ## Configuration
 
-Usually nothing: the scorer declares this producer's data key as `Required`, so it is auto-created
-with defaults. Configure it explicitly only to tune the windows:
+The producer must be named and listed under `dataLayer.sources`, which is what drives its recompute.
+Only `inflight-load-producer` is auto-created, from this producer's own required data key.
 
 ```yaml
 plugins:
@@ -133,7 +153,15 @@ plugins:
     name: ttft
     parameters:
       ttftPercentilesProducerName: ttft-observer
+dataLayer:
+  sources:
+    # Drives the periodic recompute. Scrapes nothing, binds no extractors.
+    - pluginRef: ttft-observer
 ```
+
+`intervalDuration` is rounded to a multiple of the datalayer's base tick, and that base tick drops to
+the smallest interval any configured source asks for — so a fast scrape source elsewhere in the
+config can shift when this recompute lands.
 
 See the [scorer README](../../../scheduling/scorer/latencyobservation/README.md) for the prediction model and
 an end-to-end pipeline.

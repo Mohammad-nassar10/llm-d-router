@@ -59,7 +59,7 @@ var (
 type Config struct {
 	// Probability that an under-observed endpoint is probed. Range [0, 1].
 	ExplorationRate float64 `json:"explorationRate,omitempty"`
-	// Minimum in-flight separation for the low operating point to be usable as
+	// Minimum in-flight separation for the low-load anchor to be usable as
 	// a curve anchor; below it their slope is noise. Must be > 0.
 	MinInflightGap float64 `json:"minInflightGap,omitempty"`
 	// Quantization step in seconds, so endpoints closer together than this tie
@@ -172,7 +172,7 @@ func (s *Scorer) Consumes() fwkplugin.DataDependencies {
 // eval is the per-endpoint working state for one Score call.
 type eval struct {
 	pred        float64
-	hasBaseline bool // operating points usable, so the full curve applies
+	hasBaseline bool // load anchors usable, so the full curve applies
 	hasFloor    bool // has a service floor, i.e. is not cold
 }
 
@@ -183,7 +183,7 @@ func calibration(m *attrlatency.TTFTPercentiles) (floor float64, hasFloor, hasBa
 	if floor == 0 {
 		return 0, false, false
 	}
-	return floor, true, m.RecentN >= m.MinRequests && m.InflightAtHigh > 0 && m.HighTTFT > floor
+	return floor, true, m.RecentRequestCount >= m.CalibrationThreshold && m.InflightAtTypicalLoad > 0 && m.TypicalLoadTTFT > floor
 }
 
 // Score ranks endpoints by predicted TTFT, min-max normalized so the lowest
@@ -292,8 +292,8 @@ func (s *Scorer) read(endpoint fwksched.Endpoint) (percentiles *attrlatency.TTFT
 }
 
 // predict evaluates the endpoint's TTFT-vs-load curve at cur, its live
-// in-flight count. The curve runs through A (0, floor), B (InflightAtLow,
-// LowTTFT) and C (InflightAtHigh, HighTTFT); every point is measured. See
+// in-flight count. The curve runs through A (0, floor), B (InflightAtLowLoad,
+// LowLoadTTFT) and C (InflightAtTypicalLoad, TypicalLoadTTFT); every point is measured. See
 // README.md for why three points rather than two.
 //
 // Only meaningful for an endpoint with a baseline; callers use the floor alone
@@ -302,23 +302,23 @@ func (s *Scorer) predict(m *attrlatency.TTFTPercentiles, floor, cur float64) (pr
 	// The low point is admissible only when it is separated from the high point
 	// in load, ordered below it in latency, and above the floor. Otherwise its
 	// segment slopes on noise, or downwards.
-	useLow := m.InflightAtHigh-m.InflightAtLow >= s.minInflightGap &&
-		m.HighTTFT > m.LowTTFT &&
-		m.LowTTFT > floor &&
-		m.InflightAtLow > 0
+	useLow := m.InflightAtTypicalLoad-m.InflightAtLowLoad >= s.minInflightGap &&
+		m.TypicalLoadTTFT > m.LowLoadTTFT &&
+		m.LowLoadTTFT > floor &&
+		m.InflightAtLowLoad > 0
 
 	switch {
-	case useLow && cur < m.InflightAtLow:
+	case useLow && cur < m.InflightAtLowLoad:
 		// Segment A->B. Extending the steeper B->C slope backwards instead
 		// would predict a draining-but-still-loaded endpoint at its idle
 		// latency, so it would win every decision it appeared in.
-		pred = floor + cur*(m.LowTTFT-floor)/m.InflightAtLow
+		pred = floor + cur*(m.LowLoadTTFT-floor)/m.InflightAtLowLoad
 	case useLow:
 		// Segment B->C, extended beyond C.
-		pred = m.LowTTFT + (cur-m.InflightAtLow)*(m.HighTTFT-m.LowTTFT)/(m.InflightAtHigh-m.InflightAtLow)
+		pred = m.LowLoadTTFT + (cur-m.InflightAtLowLoad)*(m.TypicalLoadTTFT-m.LowLoadTTFT)/(m.InflightAtTypicalLoad-m.InflightAtLowLoad)
 	default:
 		// Low point inadmissible: the single floor chord A->C, extended beyond C.
-		pred = floor + cur*(m.HighTTFT-floor)/m.InflightAtHigh
+		pred = floor + cur*(m.TypicalLoadTTFT-floor)/m.InflightAtTypicalLoad
 	}
 	return max(pred, floor)
 }

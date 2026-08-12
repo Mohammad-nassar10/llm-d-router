@@ -35,42 +35,42 @@ var TTFTPercentilesDataKey = plugin.NewDataKey("TTFTPercentilesDataKey", observe
 type TTFTPercentiles struct {
 	// Load-invariant service floor: a low percentile over a history of
 	// per-bucket low percentiles. See Floor.
-	P10LowTTFT float64
+	FloorTTFT float64
 	// Short-window P10, used as the floor before the bucket history fills.
-	P10TTFT float64
+	WindowFloorTTFT float64
 
-	// TTFT at the low and high operating percentiles, default P25 and P50.
-	LowTTFT  float64
-	HighTTFT float64
+	// TTFT at the low-load and typical-load percentiles, default P25 and P50.
+	LowLoadTTFT     float64
+	TypicalLoadTTFT float64
 	// Average in-flight-at-dispatch in the bands around them. A band rather
 	// than a single observation stabilises the estimate.
-	InflightAtLow  float64
-	InflightAtHigh float64
+	InflightAtLowLoad     float64
+	InflightAtTypicalLoad float64
 
-	// Observations in the short window; gates whether the operating points are
+	// Observations in the short window; gates whether the load anchors are
 	// trusted.
-	RecentN int
+	RecentRequestCount int
 	// Cumulative count feeding the floor, so an endpoint that has already
 	// calibrated does not read cold again after going briefly idle.
 	Observations int64
-	// Threshold copied from the producer's config, so consumers need no
-	// separate parameter to interpret RecentN and Observations.
-	MinRequests int
+	// Threshold copied from the producer's minRequests, so consumers need no
+	// separate parameter to interpret RecentRequestCount and Observations.
+	CalibrationThreshold int
 }
 
 // Floor returns the service floor, or zero when the endpoint is cold.
 //
-// Fewer than MinRequests observations also reads as cold: a percentile over a
-// handful of cold-start requests is noise, and returning it would let a
+// Fewer observations than CalibrationThreshold also reads as cold: a percentile
+// over a handful of cold-start requests is noise, and returning it would let a
 // barely-observed endpoint compete on a value that happens to look good.
 func (m *TTFTPercentiles) Floor() float64 {
-	if m == nil || m.Observations < int64(m.MinRequests) {
+	if m == nil || m.Observations < int64(m.CalibrationThreshold) {
 		return 0
 	}
-	if m.P10LowTTFT > 0 {
-		return m.P10LowTTFT
+	if m.FloorTTFT > 0 {
+		return m.FloorTTFT
 	}
-	return m.P10TTFT
+	return m.WindowFloorTTFT
 }
 
 // Clone returns an independent copy.

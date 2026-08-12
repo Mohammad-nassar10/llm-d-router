@@ -16,7 +16,7 @@ plugins:
       maxRequests: 50
       minRequests: 1
       lowPercentile: 25
-      highPercentile: 50
+      typicalPercentile: 50
       bucketDuration: 100ms
       bucketHistorySize: 2
   - type: latency-observation-scorer
@@ -35,3 +35,6 @@ requestHandler:
 dataLayer:
   sources:
     - pluginRef: mock-metrics-source
+    # The observer is a PollingDispatcher: listing it here is what drives its
+    # periodic recompute. It scrapes nothing and binds no extractors.
+    - pluginRef: ttft-observer

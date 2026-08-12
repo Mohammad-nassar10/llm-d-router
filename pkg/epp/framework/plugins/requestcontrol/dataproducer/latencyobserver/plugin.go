@@ -21,9 +21,10 @@ limitations under the License.
 // It spans two layers because neither can do the job alone: request-control
 // hooks are the only place traffic is visible, while the attribute the scorer
 // reads is a datalayer concept. Measurement therefore happens in
-// PreRequest/ResponseBody, the summary is recomputed on a background ticker,
-// and the result is exposed through a DynamicAttribute attached once per
-// endpoint — the shape inflight-load-producer uses.
+// PreRequest/ResponseBody, the summary is recomputed when the datalayer
+// dispatches to this producer as a polling source, and the result is exposed
+// through a DynamicAttribute attached once per endpoint — the shape
+// inflight-load-producer uses.
 package latencyobserver
 
 import (
@@ -65,6 +66,7 @@ var (
 	_ fwkplugin.ConsumerPlugin = &Observer{}
 	_ fwkdl.EndpointExtractor  = (*Observer)(nil)
 	_ fwkdl.Registrant         = &Observer{}
+	_ fwkdl.PollingDispatcher  = &Observer{}
 )
 
 // Config holds the observer's parameters; durations are time.ParseDuration
@@ -84,9 +86,9 @@ type Config struct {
 	// Evidence threshold below which the scorer treats an endpoint as
 	// uncalibrated. Published in the snapshot so consumers need no own copy.
 	MinRequests int `json:"minRequests,omitempty"`
-	// Operating anchors. Must satisfy 0 < low < high < 100.
-	LowPercentile  int `json:"lowPercentile,omitempty"`
-	HighPercentile int `json:"highPercentile,omitempty"`
+	// The two load anchors. Must satisfy 0 < low < typical < 100.
+	LowPercentile     int `json:"lowPercentile,omitempty"`
+	TypicalPercentile int `json:"typicalPercentile,omitempty"`
 	// Window for each floor-history entry's P10. Keep <= MaxObservationAge so a
 	// full bucket is retained.
 	BucketDuration string `json:"bucketDuration,omitempty"`
@@ -104,7 +106,7 @@ var DefaultConfig = Config{
 	MaxRequests:       100,
 	MinRequests:       10,
 	LowPercentile:     25,
-	HighPercentile:    50,
+	TypicalPercentile: 50,
 	BucketDuration:    "1m",
 	BucketHistorySize: 1000,
 }
@@ -120,7 +122,7 @@ type resolvedConfig struct {
 	minRequests       int
 	bucketHistorySize int
 	lowPercentile     float64
-	highPercentile    float64
+	typicalPercentile float64
 }
 
 func (c Config) resolve() (resolvedConfig, error) {
@@ -148,15 +150,15 @@ func (c Config) resolve() (resolvedConfig, error) {
 		return out, fmt.Errorf("minRequests must be > 0, got %d", c.MinRequests)
 	case c.BucketHistorySize < 2:
 		return out, fmt.Errorf("bucketHistorySize must be >= 2, got %d", c.BucketHistorySize)
-	case c.LowPercentile <= 0 || c.HighPercentile >= 100 || c.LowPercentile >= c.HighPercentile:
-		return out, fmt.Errorf("percentiles must satisfy 0 < lowPercentile (%d) < highPercentile (%d) < 100",
-			c.LowPercentile, c.HighPercentile)
+	case c.LowPercentile <= 0 || c.TypicalPercentile >= 100 || c.LowPercentile >= c.TypicalPercentile:
+		return out, fmt.Errorf("percentiles must satisfy 0 < lowPercentile (%d) < typicalPercentile (%d) < 100",
+			c.LowPercentile, c.TypicalPercentile)
 	}
 
 	out.windowSize, out.maxRequests, out.minRequests = c.WindowSize, c.MaxRequests, c.MinRequests
 	out.bucketHistorySize = c.BucketHistorySize
 	out.lowPercentile = float64(c.LowPercentile) / 100
-	out.highPercentile = float64(c.HighPercentile) / 100
+	out.typicalPercentile = float64(c.TypicalPercentile) / 100
 	return out, nil
 }
 
@@ -198,10 +200,10 @@ type endpointState struct {
 	tracker *slidingWindowTracker
 
 	// The floor: once per bucketDuration the bucket's P10 joins the history,
-	// and p10Low is a low percentile of that history.
+	// and floor is a low percentile of that history.
 	bucketStart time.Time
 	bucketP10s  []float64
-	p10Low      float64
+	floor       float64
 
 	observations           int64
 	lastTTFT               float64
@@ -212,8 +214,8 @@ type endpointState struct {
 	published atomic.Pointer[attrlatency.TTFTPercentiles]
 }
 
-// LatencyObserverFactory builds an Observer and starts its flush loop, which
-// runs until the handle's context is cancelled.
+// LatencyObserverFactory builds an Observer. The recompute is driven by the
+// datalayer once the observer is listed under dataLayer.sources; see README.md.
 func LatencyObserverFactory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
@@ -234,13 +236,10 @@ func LatencyObserverFactory(name string, rawParameters *json.Decoder, handle fwk
 	if err != nil {
 		return nil, fmt.Errorf("invalid parameters for plugin %q: %w", name, err)
 	}
-	go observer.flushLoop(ctx)
 	return observer, nil
 }
 
 // NewObserver initializes an Observer whose per-request state is bound to ctx.
-// It does not start the flush loop: tests drive flushAll directly so they need
-// no ticker, and the factory owns the goroutine.
 func NewObserver(ctx context.Context, name string, cfg Config) (*Observer, error) {
 	resolved, err := cfg.resolve()
 	if err != nil {
@@ -355,11 +354,11 @@ type endpointDebugState struct {
 	LastInflightAtDispatch int64   `json:"lastInflightAtDispatch"`
 	Observations           int64   `json:"observations"`
 	FloorSeconds           float64 `json:"floorSeconds"`
-	RecentN                int     `json:"recentN"`
-	LowTTFTSeconds         float64 `json:"lowTtftSeconds"`
-	HighTTFTSeconds        float64 `json:"highTtftSeconds"`
-	InflightAtLow          float64 `json:"inflightAtLow"`
-	InflightAtHigh         float64 `json:"inflightAtHigh"`
+	RecentRequestCount     int     `json:"recentN"`
+	LowLoadTTFTSeconds     float64 `json:"lowTtftSeconds"`
+	TypicalLoadTTFTSeconds float64 `json:"highTtftSeconds"`
+	InflightAtLowLoad      float64 `json:"inflightAtLow"`
+	InflightAtTypicalLoad  float64 `json:"inflightAtHigh"`
 }
 
 // DumpState implements [fwkplugin.StateDumper] for /debug/plugins/state.
@@ -388,11 +387,11 @@ func (p *Observer) snapshotDebugState() observerDebugState {
 
 		if snapshot := state.published.Load(); snapshot != nil {
 			entry.FloorSeconds = snapshot.Floor()
-			entry.RecentN = snapshot.RecentN
-			entry.LowTTFTSeconds = snapshot.LowTTFT
-			entry.HighTTFTSeconds = snapshot.HighTTFT
-			entry.InflightAtLow = snapshot.InflightAtLow
-			entry.InflightAtHigh = snapshot.InflightAtHigh
+			entry.RecentRequestCount = snapshot.RecentRequestCount
+			entry.LowLoadTTFTSeconds = snapshot.LowLoadTTFT
+			entry.TypicalLoadTTFTSeconds = snapshot.TypicalLoadTTFT
+			entry.InflightAtLowLoad = snapshot.InflightAtLowLoad
+			entry.InflightAtTypicalLoad = snapshot.InflightAtTypicalLoad
 		}
 		dump.Endpoints = append(dump.Endpoints, entry)
 	}

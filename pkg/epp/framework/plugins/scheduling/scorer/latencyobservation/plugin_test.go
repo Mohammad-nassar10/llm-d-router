@@ -37,14 +37,14 @@ type pct = attrlatency.TTFTPercentiles
 // floor 0.20, B at (4, 0.35), C at (9, 0.55).
 func trusted() *pct {
 	return &attrlatency.TTFTPercentiles{
-		P10LowTTFT:     0.20,
-		LowTTFT:        0.35,
-		HighTTFT:       0.55,
-		InflightAtLow:  4,
-		InflightAtHigh: 9,
-		RecentN:        100,
-		Observations:   100,
-		MinRequests:    10,
+		FloorTTFT:             0.20,
+		LowLoadTTFT:           0.35,
+		TypicalLoadTTFT:       0.55,
+		InflightAtLowLoad:     4,
+		InflightAtTypicalLoad: 9,
+		RecentRequestCount:    100,
+		Observations:          100,
+		CalibrationThreshold:  10,
 	}
 }
 
@@ -147,9 +147,9 @@ func TestPredict(t *testing.T) {
 		{"below minRequests observations", with(func(m *pct) { m.Observations = 9 }), 5, 0, false, false},
 
 		// a floor but no usable operating points: predicts at the floor
-		{"short window below minRequests", with(func(m *pct) { m.RecentN = 9 }), 5, 0.20, true, false},
-		{"no high in-flight anchor", with(func(m *pct) { m.InflightAtHigh = 0 }), 5, 0.20, true, false},
-		{"high anchor at the floor", with(func(m *pct) { m.HighTTFT = 0.20 }), 5, 0.20, true, false},
+		{"short window below minRequests", with(func(m *pct) { m.RecentRequestCount = 9 }), 5, 0.20, true, false},
+		{"no high in-flight anchor", with(func(m *pct) { m.InflightAtTypicalLoad = 0 }), 5, 0.20, true, false},
+		{"high anchor at the floor", with(func(m *pct) { m.TypicalLoadTTFT = 0.20 }), 5, 0.20, true, false},
 
 		// calibrated, low point admissible: two segments
 		{"idle predicts the floor", trusted(), 0, 0.20, true, true},
@@ -159,13 +159,13 @@ func TestPredict(t *testing.T) {
 		{"beyond the high anchor extends B to C", trusted(), 20, 0.99, true, true},
 
 		// calibrated, low point inadmissible: the single floor chord A to C
-		{"anchors too close in load", with(func(m *pct) { m.InflightAtLow = 8 }), 9, 0.55, true, true},
-		{"inverted latency ordering", with(func(m *pct) { m.HighTTFT = 0.30 }), 9, 0.30, true, true},
-		{"low anchor under the floor", with(func(m *pct) { m.LowTTFT = 0.15 }), 9, 0.55, true, true},
-		{"zero low in-flight anchor", with(func(m *pct) { m.InflightAtLow = 0 }), 9, 0.55, true, true},
+		{"anchors too close in load", with(func(m *pct) { m.InflightAtLowLoad = 8 }), 9, 0.55, true, true},
+		{"inverted latency ordering", with(func(m *pct) { m.TypicalLoadTTFT = 0.30 }), 9, 0.30, true, true},
+		{"low anchor under the floor", with(func(m *pct) { m.LowLoadTTFT = 0.15 }), 9, 0.55, true, true},
+		{"zero low in-flight anchor", with(func(m *pct) { m.InflightAtLowLoad = 0 }), 9, 0.55, true, true},
 
 		// the floor falls back to the short-window P10 before the history fills
-		{"short-window P10 as floor", with(func(m *pct) { m.P10LowTTFT, m.P10TTFT = 0, 0.20 }), 9, 0.55, true, true},
+		{"short-window P10 as floor", with(func(m *pct) { m.FloorTTFT, m.WindowFloorTTFT = 0, 0.20 }), 9, 0.55, true, true},
 	}
 
 	for _, tc := range tests {
@@ -232,9 +232,9 @@ func TestScore(t *testing.T) {
 		loaded := newEndpoint(trusted(), inflightPtr(20))
 		// idle but intrinsically slower: floor 0.60, B at (2, 0.75), C at (6, 0.95)
 		idle := newEndpoint(&attrlatency.TTFTPercentiles{
-			P10LowTTFT: 0.60, LowTTFT: 0.75, HighTTFT: 0.95,
-			InflightAtLow: 2, InflightAtHigh: 6,
-			RecentN: 100, Observations: 100, MinRequests: 10,
+			FloorTTFT: 0.60, LowLoadTTFT: 0.75, TypicalLoadTTFT: 0.95,
+			InflightAtLowLoad: 2, InflightAtTypicalLoad: 6,
+			RecentRequestCount: 100, Observations: 100, CalibrationThreshold: 10,
 		}, inflightPtr(1)) // -> 0.60 + 1*(0.75-0.60)/2 = 0.675s
 
 		scores := s.Score(ctx, nil, []fwksched.Endpoint{loaded, idle})
@@ -266,7 +266,7 @@ func TestScore(t *testing.T) {
 		calibrated := newEndpoint(trusted(), inflightPtr(20))    // pred 0.99
 		fastCalibrated := newEndpoint(trusted(), inflightPtr(0)) // pred 0.20, would win
 		uncalibrated := newEndpoint(with(func(m *pct) {
-			m.RecentN = 2 // has a floor, but no trusted operating point
+			m.RecentRequestCount = 2 // has a floor, but no trusted operating point
 		}), inflightPtr(50))
 
 		scores := s.Score(ctx, nil, []fwksched.Endpoint{calibrated, fastCalibrated, uncalibrated})
@@ -282,7 +282,7 @@ func TestScore(t *testing.T) {
 		for range 200 {
 			calibrated := newEndpoint(trusted(), inflightPtr(20))
 			uncalibrated := newEndpoint(with(func(m *pct) {
-				m.RecentN = 2
+				m.RecentRequestCount = 2
 			}), inflightPtr(50))
 
 			scores := s.Score(ctx, nil, []fwksched.Endpoint{calibrated, uncalibrated})

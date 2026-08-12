@@ -34,10 +34,13 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
+// testEndpointID is the namespaced name of the endpoint the tests observe.
+const testEndpointID = "default/a"
+
 // newDataEndpoint builds a datalayer endpoint, as the lifecycle source delivers.
-func newDataEndpoint(id string) fwkdl.Endpoint {
+func newDataEndpoint() fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		ID: types.NamespacedName{Name: id, Namespace: "default"},
+		ID: types.NamespacedName{Name: "a", Namespace: "default"},
 	}, nil)
 }
 
@@ -106,7 +109,7 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 
 	t.Run("add attaches an attribute that reads cold until a snapshot exists", func(t *testing.T) {
 		p := newObserver(t)
-		endpoint := newDataEndpoint("a")
+		endpoint := newDataEndpoint()
 
 		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 			Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint,
@@ -118,7 +121,7 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 
 		// Publishing makes the same closure resolve, with no further write to
 		// the attribute map.
-		p.stateFor("default/a").published.Store(&attrlatency.TTFTPercentiles{P10LowTTFT: 0.2, Observations: 50, MinRequests: 10})
+		p.stateFor("default/a").published.Store(&attrlatency.TTFTPercentiles{FloorTTFT: 0.2, Observations: 50, CalibrationThreshold: 10})
 
 		raw, ok := endpoint.GetAttributes().Get(p.percentilesDataKey.String())
 		require.True(t, ok)
@@ -129,12 +132,12 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 
 	t.Run("the attribute tracks later snapshots", func(t *testing.T) {
 		p := newObserver(t)
-		endpoint := newDataEndpoint("a")
+		endpoint := newDataEndpoint()
 		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint}))
 
 		state := p.stateFor("default/a")
-		state.published.Store(&attrlatency.TTFTPercentiles{P10LowTTFT: 0.2, Observations: 50, MinRequests: 10})
-		state.published.Store(&attrlatency.TTFTPercentiles{P10LowTTFT: 0.4, Observations: 50, MinRequests: 10})
+		state.published.Store(&attrlatency.TTFTPercentiles{FloorTTFT: 0.2, Observations: 50, CalibrationThreshold: 10})
+		state.published.Store(&attrlatency.TTFTPercentiles{FloorTTFT: 0.4, Observations: 50, CalibrationThreshold: 10})
 
 		raw, ok := endpoint.GetAttributes().Get(p.percentilesDataKey.String())
 		require.True(t, ok)
@@ -143,7 +146,7 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 
 	t.Run("delete drops the endpoint's state", func(t *testing.T) {
 		p := newObserver(t)
-		endpoint := newDataEndpoint("a")
+		endpoint := newDataEndpoint()
 		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint}))
 		p.record("default/a", 0.5, 3, time.Now())
 		require.Len(t, p.snapshotDebugState().Endpoints, 1)
