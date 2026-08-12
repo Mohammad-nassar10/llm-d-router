@@ -663,7 +663,6 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, fwkplugin.StabilityBeta, mmproducer.Factory, mmproducer.ProducedKey)
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, fwkplugin.StabilityBeta, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, fwkplugin.StabilityBeta, sessionid.Factory, attrsession.SessionIDDataKey)
-	// Alpha
 	fwkplugin.RegisterAsDefaultProducer(latencyobserver.LatencyObserverProducerType, fwkplugin.StabilityAlpha, latencyobserver.LatencyObserverFactory, attrlatency.TTFTPercentilesDataKey)
 
 	// Latency predictor plugins
