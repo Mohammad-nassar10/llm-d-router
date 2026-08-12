@@ -66,15 +66,13 @@ func (p *Observer) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// Produce records each candidate's current in-flight count under a
-// request-scoped key of its own, so PreRequest sees it unchanged.
+// Produce pins each candidate's current in-flight load under a request-scoped
+// key of its own, so PreRequest sees it unchanged.
 //
-// Taken here rather than in PreRequest because InFlightLoad is a live view of
-// the producer's counters, and that producer increments them in its own
-// PreRequest hook. PreRequest hooks have no defined order between plugins, so
-// reading there would include or exclude this very request depending on
-// registration order. Produce is DAG-ordered, so this value is well defined:
-// the load carried before this request landed.
+// Not in PreRequest: inflight-load-producer increments its counters in its own
+// PreRequest, and hook order between plugins is undefined, so reading there
+// would count this very request or not depending on registration order. Produce
+// is DAG-ordered, so the value means the load carried before this one landed.
 func (p *Observer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	for _, endpoint := range endpoints {
 		if endpoint == nil || endpoint.GetMetadata() == nil {
@@ -118,8 +116,7 @@ func (p *Observer) PreRequest(ctx context.Context, request *fwksched.InferenceRe
 }
 
 // primaryTarget returns the endpoint the primary profile selected, or nil. TTFT
-// belongs to whichever endpoint produced the first token, which for a
-// single-profile deployment is the primary target.
+// belongs to whichever endpoint produced the first token.
 func primaryTarget(result *fwksched.SchedulingResult) fwksched.Endpoint {
 	if result == nil {
 		return nil
@@ -153,11 +150,9 @@ func (p *Observer) ResponseBody(ctx context.Context, request *fwksched.Inference
 
 // observeFirstChunk records the TTFT for the request's dispatch record.
 //
-// A response whose first chunk is also its last carries no time-to-first-token:
-// its latency is end-to-end, which includes decode and sits far above the real
-// TTFT. Recording it would corrupt both the floor and the operating anchors, so
-// it is discarded. A deployment that never streams therefore produces no
-// observations, and every endpoint stays cold.
+// A response whose first chunk is also its last is discarded: its latency is
+// end-to-end, which includes decode and sits far above the real TTFT, so
+// recording it would corrupt both the floor and the load anchors.
 func (p *Observer) observeFirstChunk(ctx context.Context, requestID string, endOfStream bool) {
 	if endOfStream {
 		return

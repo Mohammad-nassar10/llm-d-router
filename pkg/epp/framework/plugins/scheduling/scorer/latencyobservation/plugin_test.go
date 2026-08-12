@@ -146,7 +146,7 @@ func TestPredict(t *testing.T) {
 		{"zero value", &pct{}, 5, 0, false, false},
 		{"below minRequests observations", with(func(m *pct) { m.Observations = 9 }), 5, 0, false, false},
 
-		// a floor but no usable operating points: predicts at the floor
+		// a floor but no usable load anchors: predicts at the floor
 		{"short window below minRequests", with(func(m *pct) { m.RecentRequestCount = 9 }), 5, 0.20, true, false},
 		{"no high in-flight anchor", with(func(m *pct) { m.InflightAtTypicalLoad = 0 }), 5, 0.20, true, false},
 		{"high anchor at the floor", with(func(m *pct) { m.TypicalLoadTTFT = 0.20 }), 5, 0.20, true, false},
@@ -266,7 +266,7 @@ func TestScore(t *testing.T) {
 		calibrated := newEndpoint(trusted(), inflightPtr(20))    // pred 0.99
 		fastCalibrated := newEndpoint(trusted(), inflightPtr(0)) // pred 0.20, would win
 		uncalibrated := newEndpoint(with(func(m *pct) {
-			m.RecentRequestCount = 2 // has a floor, but no trusted operating point
+			m.RecentRequestCount = 2 // has a floor, but no trusted load anchor
 		}), inflightPtr(50))
 
 		scores := s.Score(ctx, nil, []fwksched.Endpoint{calibrated, fastCalibrated, uncalibrated})

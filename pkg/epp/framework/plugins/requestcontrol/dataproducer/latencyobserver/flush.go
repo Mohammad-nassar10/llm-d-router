@@ -34,17 +34,14 @@ import (
 func (p *Observer) Interval() time.Duration { return p.cfg.interval }
 
 // AppendExtractor rejects extractors: this dispatcher publishes its own state
-// rather than sourcing data for others, the shape cross-replica-publisher uses.
-// The caller names both plugins when it wraps this error.
+// rather than sourcing data for others. The caller adds the plugin names.
 func (p *Observer) AppendExtractor(fwkplugin.Plugin) error {
 	return errors.New("latency observer does not accept extractors")
 }
 
-// Dispatch recomputes and publishes one endpoint's snapshot. The datalayer's
-// collector calls it once per Interval, for each endpoint.
-//
-// An endpoint that stops receiving traffic is still visited, so its window ages
-// out rather than freezing on a stale snapshot.
+// Dispatch recomputes and publishes one endpoint's snapshot; the datalayer's
+// collector calls it once per Interval. An endpoint with no recent traffic is
+// still visited, so its window ages out rather than freezing.
 func (p *Observer) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	if ep == nil || ep.GetMetadata() == nil {
 		return nil
@@ -54,11 +51,8 @@ func (p *Observer) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	return nil
 }
 
-// publish recomputes one endpoint's snapshot and swaps it in.
-//
-// The anchors are otherwise only visible through StateDumper, which the
-// standalone file-discovery mode does not serve, so this log is the only way to
-// see them in a multi-cluster hub.
+// publish recomputes one endpoint's snapshot and swaps it in. The log is the
+// only view of the anchors in file-discovery mode, which serves no StateDumper.
 func (p *Observer) publish(ctx context.Context, id string, state *endpointState, now time.Time) {
 	snapshot := state.flush(now, p.cfg)
 	state.published.Store(snapshot)
@@ -78,11 +72,10 @@ func (p *Observer) publish(ctx context.Context, id string, state *endpointState,
 	}
 }
 
-// flush recomputes one endpoint's snapshot from two windows. The short window
-// is capped and age-bounded, yielding operating anchors that track load
-// quickly. The floor is slower, and deliberately so: because its history spans
-// both busy and quiet buckets, a low percentile of it locks onto the quiet ones
-// — the queue-free service time — instead of drifting up with recent load.
+// flush recomputes one endpoint's snapshot from two windows: the short one is
+// capped and age-bounded, so its load anchors track current behaviour, while the
+// bucket history spans busy and quiet buckets, so a low percentile of it locks
+// onto the quiet ones — the queue-free floor — rather than drifting up with load.
 func (s *endpointState) flush(now time.Time, cfg resolvedConfig) *attrlatency.TTFTPercentiles {
 	s.mu.Lock()
 	defer s.mu.Unlock()

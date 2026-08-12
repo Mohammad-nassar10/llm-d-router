@@ -15,16 +15,12 @@ limitations under the License.
 */
 
 // Package latencyobserver measures each request's time-to-first-token per
-// endpoint and publishes a summary of the recent distribution for the
-// ttft-aware scorer.
+// endpoint and publishes a summary for the latency-observation scorer.
 //
 // It spans two layers because neither can do the job alone: request-control
 // hooks are the only place traffic is visible, while the attribute the scorer
-// reads is a datalayer concept. Measurement therefore happens in
-// PreRequest/ResponseBody, the summary is recomputed when the datalayer
-// dispatches to this producer as a polling source, and the result is exposed
-// through a DynamicAttribute attached once per endpoint — the shape
-// inflight-load-producer uses.
+// reads is a datalayer concept. The summary is published through a
+// DynamicAttribute attached once per endpoint, as inflight-load-producer does.
 package latencyobserver
 
 import (
