@@ -44,6 +44,20 @@ func newDataEndpoint() fwkdl.Endpoint {
 	}, nil)
 }
 
+func newObserver(t *testing.T) *Observer {
+	t.Helper()
+	return newObserverWithConfig(t, DefaultConfig)
+}
+
+func newObserverWithConfig(t *testing.T, cfg Config) *Observer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	observer, err := NewObserver(ctx, "ttft-observer", cfg)
+	require.NoError(t, err)
+	return observer
+}
+
 // recordingRegistrar captures what RegisterDependencies asked for.
 type recordingRegistrar struct {
 	registrations []fwkdl.PendingRegistration
