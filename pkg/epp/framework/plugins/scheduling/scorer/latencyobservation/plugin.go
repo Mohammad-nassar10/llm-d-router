@@ -261,6 +261,9 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 
 	if debugLogger := log.FromContext(ctx).V(logutil.DEBUG); debugLogger.Enabled() {
 		for i, endpoint := range endpoints {
+			if endpoint == nil || endpoint.GetMetadata() == nil {
+				continue
+			}
 			debugLogger.Info("latency-observation score",
 				"endpoint", endpoint.GetMetadata().ID.String(),
 				"predictedTTFT", evals[i].pred,
@@ -277,6 +280,9 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 // A missing or malformed snapshot yields the zero value, which reads as cold.
 func (s *Scorer) read(endpoint fwksched.Endpoint) (percentiles *attrlatency.TTFTPercentiles, inflight float64, hasInflight bool) {
 	percentiles = &attrlatency.TTFTPercentiles{}
+	if endpoint == nil {
+		return percentiles, 0, false
+	}
 	if raw, ok := endpoint.Get(s.percentilesDataKey); ok {
 		if typed, ok := raw.(*attrlatency.TTFTPercentiles); ok && typed != nil {
 			percentiles = typed
