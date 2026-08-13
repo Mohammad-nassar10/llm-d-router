@@ -53,9 +53,13 @@ func (d *dispatchInfo) Clone() fwkplugin.StateData {
 	return &cp
 }
 
-// Produces declares the percentile snapshot this producer publishes.
+// Produces declares the percentile snapshot this producer publishes, and the
+// request-scoped key Produce pins: the endpoint scope rejects undeclared writes.
 func (p *Observer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{p.percentilesDataKey: attrlatency.TTFTPercentiles{}}
+	return map[fwkplugin.DataKey]any{
+		p.percentilesDataKey:        attrlatency.TTFTPercentiles{},
+		p.inflightAtDispatchDataKey: attrconcurrency.InFlightLoad{},
+	}
 }
 
 // Consumes declares the in-flight load as Required, so the DAG runs
@@ -66,13 +70,10 @@ func (p *Observer) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// Produce pins each candidate's current in-flight load under a request-scoped
-// key of its own, so PreRequest sees it unchanged.
-//
-// Not in PreRequest: inflight-load-producer increments its counters in its own
-// PreRequest, and hook order between plugins is undefined, so reading there
-// would count this very request or not depending on registration order. Produce
-// is DAG-ordered, so the value means the load carried before this one landed.
+// Produce pins each candidate's in-flight load under a request-scoped key, so
+// PreRequest sees the load carried before this request landed. Reading it in
+// PreRequest instead would race: inflight-load-producer increments its counters
+// there too, and hook order between plugins is undefined. Produce is DAG-ordered.
 func (p *Observer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	for _, endpoint := range endpoints {
 		if endpoint == nil || endpoint.GetMetadata() == nil {

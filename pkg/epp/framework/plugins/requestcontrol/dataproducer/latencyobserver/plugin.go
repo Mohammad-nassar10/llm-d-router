@@ -180,7 +180,8 @@ type Observer struct {
 	inFlightLoadDataKey fwkplugin.DataKey // the live in-flight signal it reads
 	// inflightAtDispatchDataKey carries the in-flight reading from the
 	// DAG-ordered Produce hook forward to PreRequest. Request-scoped and
-	// internal, so it is deliberately not declared in Produces.
+	// internal, but still declared in Produces: the endpoint scope rejects a
+	// write to any undeclared key.
 	inflightAtDispatchDataKey fwkplugin.DataKey
 
 	// mu guards the map itself. Per-endpoint mutation takes that endpoint's own
