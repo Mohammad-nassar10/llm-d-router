@@ -293,7 +293,7 @@ func (p *Observer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 	case fwkdl.EventAddOrUpdate:
 		state := p.stateFor(id)
-		event.Endpoint.GetAttributes().Put(p.percentilesDataKey.String(), &fwkdl.DynamicAttribute{
+		event.Endpoint.GetAttributes().Put(p.percentilesDataKey, &fwkdl.DynamicAttribute{
 			Get: func() fwkdl.Cloneable {
 				if snapshot := state.published.Load(); snapshot != nil {
 					return snapshot

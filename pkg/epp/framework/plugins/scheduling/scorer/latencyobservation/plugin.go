@@ -277,13 +277,13 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 // A missing or malformed snapshot yields the zero value, which reads as cold.
 func (s *Scorer) read(endpoint fwksched.Endpoint) (percentiles *attrlatency.TTFTPercentiles, inflight float64, hasInflight bool) {
 	percentiles = &attrlatency.TTFTPercentiles{}
-	if raw, ok := endpoint.Get(s.percentilesDataKey.String()); ok {
+	if raw, ok := endpoint.Get(s.percentilesDataKey); ok {
 		if typed, ok := raw.(*attrlatency.TTFTPercentiles); ok && typed != nil {
 			percentiles = typed
 		}
 	}
 
-	if raw, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
+	if raw, ok := endpoint.Get(s.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return percentiles, float64(load.Requests), true
 		}

@@ -34,9 +34,6 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
-// testEndpointID is the namespaced name of the endpoint the tests observe.
-const testEndpointID = "default/a"
-
 // newDataEndpoint builds a datalayer endpoint, as the lifecycle source delivers.
 func newDataEndpoint() fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
@@ -130,14 +127,14 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 		}))
 
 		// The attribute is present, but resolves to nothing: no snapshot yet.
-		_, ok := endpoint.GetAttributes().Get(p.percentilesDataKey.String())
+		_, ok := endpoint.GetAttributes().Get(p.percentilesDataKey)
 		assert.False(t, ok, "an endpoint with no snapshot must read as cold")
 
 		// Publishing makes the same closure resolve, with no further write to
 		// the attribute map.
 		p.stateFor("default/a").published.Store(&attrlatency.TTFTPercentiles{FloorTTFT: 0.2, Observations: 50, CalibrationThreshold: 10})
 
-		raw, ok := endpoint.GetAttributes().Get(p.percentilesDataKey.String())
+		raw, ok := endpoint.GetAttributes().Get(p.percentilesDataKey)
 		require.True(t, ok)
 		snapshot, ok := raw.(*attrlatency.TTFTPercentiles)
 		require.True(t, ok)
@@ -153,7 +150,7 @@ func TestExtractEndpointLifecycle(t *testing.T) {
 		state.published.Store(&attrlatency.TTFTPercentiles{FloorTTFT: 0.2, Observations: 50, CalibrationThreshold: 10})
 		state.published.Store(&attrlatency.TTFTPercentiles{FloorTTFT: 0.4, Observations: 50, CalibrationThreshold: 10})
 
-		raw, ok := endpoint.GetAttributes().Get(p.percentilesDataKey.String())
+		raw, ok := endpoint.GetAttributes().Get(p.percentilesDataKey)
 		require.True(t, ok)
 		assert.InDelta(t, 0.4, raw.(*attrlatency.TTFTPercentiles).Floor(), 1e-9)
 	})

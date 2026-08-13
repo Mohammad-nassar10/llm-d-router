@@ -58,10 +58,10 @@ func with(mutate func(*pct)) *pct {
 func newEndpoint(percentiles *pct, inflight *int64) fwksched.Endpoint {
 	attr := fwkdl.NewAttributes()
 	if percentiles != nil {
-		attr.Put(attrlatency.TTFTPercentilesDataKey.String(), percentiles)
+		attr.Put(attrlatency.TTFTPercentilesDataKey, percentiles)
 	}
 	if inflight != nil {
-		attr.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: *inflight})
+		attr.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: *inflight})
 	}
 	return fwksched.NewEndpoint(nil, nil, attr)
 }

@@ -78,7 +78,7 @@ func (p *Observer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endp
 		if endpoint == nil || endpoint.GetMetadata() == nil {
 			continue
 		}
-		endpoint.Put(p.inflightAtDispatchDataKey.String(), &attrconcurrency.InFlightLoad{
+		endpoint.Put(p.inflightAtDispatchDataKey, &attrconcurrency.InFlightLoad{
 			Requests: readInFlightRequests(endpoint, p.inFlightLoadDataKey),
 		})
 	}
@@ -88,7 +88,7 @@ func (p *Observer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endp
 // readInFlightRequests returns the endpoint's request count under key, or zero
 // when the attribute is absent or malformed.
 func readInFlightRequests(endpoint fwksched.Endpoint, key fwkplugin.DataKey) int64 {
-	if raw, ok := endpoint.Get(key.String()); ok {
+	if raw, ok := endpoint.Get(key); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load.Requests
 		}
