@@ -122,18 +122,19 @@ parameter configures the threshold, the field carries it to consumers.
 
 ## Parameters
 
-| Parameter | Default | Description |
-|---|---|---|
-| `intervalDuration` | 1s | How often the snapshot is recomputed and published |
-| `maxObservationAge` | 3m | Time bound for the short window |
-| `maxRequests` | 100 | Cap the short window to the most recent N observations. Must be `<= windowSize` |
-| `minRequests` | 10 | Minimum observations before an anchor is calibrated; published as the snapshot's calibration threshold |
-| `lowPercentile` | 25 | Low-load anchor percentile (published as `LowLoadTTFT` / `InflightAtLowLoad`) |
-| `typicalPercentile` | 50 | Typical-load anchor percentile (`TypicalLoadTTFT` / `InflightAtTypicalLoad`); must satisfy `0 < low < typical < 100` |
-| `windowSize` | 5000 | Ring buffer capacity per endpoint, allocated up front (~200 KB) |
-| `bucketDuration` | 1m | Window for each floor-history entry's P10; keep `<= maxObservationAge` |
-| `bucketHistorySize` | 1000 | Per-bucket P10s kept for the floor; the slowest is evicted when full. Must be >= 2 |
-| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default producer |
+| Parameter | Default | Description | Tuning |
+|---|---|---|---|
+| `intervalDuration` | 1s | How often the snapshot is recomputed and published | Lower to react sooner; rounded to a multiple of the datalayer's tick |
+| `maxObservationAge` | 3m | Age bound for the short window | Lower to follow load changes faster; raise if routing flaps |
+| `maxRequests` | 100 | Count bound for the short window. Must be `<= windowSize` | Same direction as `maxObservationAge` |
+| `minRequests` | 10 | Observations before an anchor is calibrated; published as `CalibrationThreshold` | Lower so new endpoints get traffic sooner, at the cost of noisier data |
+| `lowPercentile` | 25 | Low-load anchor percentile → `LowLoadTTFT` / `InflightAtLowLoad` | Leave alone unless the latency curve bends somewhere unusual |
+| `typicalPercentile` | 50 | Typical-load anchor percentile → `TypicalLoadTTFT` / `InflightAtTypicalLoad`. Must satisfy `0 < low < typical < 100` | As above |
+| `windowSize` | 5000 | Ring buffer capacity per endpoint, allocated up front (~200 KB) | Lower to cut per-endpoint memory; keep `>= maxRequests` |
+| `bucketDuration` | 1m | Window for each floor-history entry's P10 | Keep `<= maxObservationAge`; with `bucketHistorySize`, sets how far back the floor remembers |
+| `bucketHistorySize` | 1000 | Per-bucket P10s kept for the floor. Must be >= 2 | Lower to let the floor forgive an endpoint that became permanently slower |
+| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | — |
+
 
 ## Configuration
 

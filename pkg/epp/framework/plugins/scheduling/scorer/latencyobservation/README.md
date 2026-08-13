@@ -133,16 +133,14 @@ and ties for the win, taking a share of all traffic before anything is known abo
 
 ## Parameters
 
-| Parameter | Default | Description |
-|---|---|---|
-| `explorationRate` | 0.1 | Per-endpoint probability that an under-observed endpoint is probed on a given request. 0 = all traffic to the trusted winner. |
-| `minInflightGap` | 2.0 | Minimum in-flight separation between the two load anchors for the low-load one to be used. Must be > 0. |
-| `roundTTFTStep` | 0.0 | Quantize each prediction to a multiple of this many seconds before ranking (e.g. `0.01` = 10 ms). Endpoints landing in the same bucket tie and the picker splits them, instead of one winning on a difference too small to be meaningful. `0` = disabled. Must be >= 0. |
-| `ttftPercentilesProducerName` | "" | Which `latency-observer-producer` instance to read. Empty uses the default producer. |
-| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default producer. |
+| Parameter | Default | Description | Tuning |
+|---|---|---|---|
+| `explorationRate` | 0.1 | Per-endpoint probability of probing an under-observed endpoint. Range `[0, 1]` | Raise to give new or recovered endpoints a better chance of being tried; `0` sends everything to the trusted winner |
+| `minInflightGap` | 2.0 | In-flight separation the two load anchors need before the low-load one is used. Must be > 0 | Raise to be stricter about when the curve is trusted; lower to use it on endpoints whose load barely varies |
+| `roundTTFTStep` | 0.0 | Rounding step for predictions, in seconds. `0` disables. Must be >= 0 | Set to about `0.01` (10 ms) when endpoints swap over differences too small to matter |
+| `ttftPercentilesProducerName` | "" | Which `latency-observer-producer` instance to read. Empty uses the default | — |
+| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | — |
 
-The calibration threshold is read from the observer's published snapshot and configured
-[there](../../../requestcontrol/dataproducer/latencyobserver/README.md) as `minRequests`, not here.
 
 ## Configuration
 
