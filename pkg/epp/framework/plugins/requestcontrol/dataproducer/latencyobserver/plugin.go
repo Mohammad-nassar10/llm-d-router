@@ -52,6 +52,10 @@ const (
 	// read back when the first response chunk arrives.
 	dispatchStateKey = fwkplugin.StateKey("dispatch")
 
+	// inflightStateKey names the per-request in-flight readings Produce takes
+	// for every candidate, which PreRequest narrows to the winner.
+	inflightStateKey = fwkplugin.StateKey("inflight-at-dispatch")
+
 	// maxDebugDumpEndpoints bounds the DumpState payload on large deployments.
 	maxDebugDumpEndpoints = 100
 )
@@ -178,11 +182,6 @@ type Observer struct {
 
 	percentilesDataKey  fwkplugin.DataKey // what this producer publishes
 	inFlightLoadDataKey fwkplugin.DataKey // the live in-flight signal it reads
-	// inflightAtDispatchDataKey carries the in-flight reading from the
-	// DAG-ordered Produce hook forward to PreRequest. Request-scoped and
-	// internal, but still declared in Produces: the endpoint scope rejects a
-	// write to any undeclared key.
-	inflightAtDispatchDataKey fwkplugin.DataKey
 
 	// mu guards the map itself. Per-endpoint mutation takes that endpoint's own
 	// lock, so a slow update never blocks another endpoint. Lock order is always
@@ -243,13 +242,12 @@ func NewObserver(ctx context.Context, name string, cfg Config) (*Observer, error
 		return nil, err
 	}
 	return &Observer{
-		typedName:                 fwkplugin.TypedName{Type: LatencyObserverProducerType, Name: name},
-		PluginState:               fwkplugin.NewPluginState(ctx),
-		cfg:                       resolved,
-		percentilesDataKey:        attrlatency.TTFTPercentilesDataKey.WithNonEmptyProducerName(name),
-		inFlightLoadDataKey:       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
-		inflightAtDispatchDataKey: fwkplugin.NewDataKey("TTFTInflightAtDispatchDataKey", LatencyObserverProducerType).WithNonEmptyProducerName(name),
-		state:                     map[string]*endpointState{},
+		typedName:           fwkplugin.TypedName{Type: LatencyObserverProducerType, Name: name},
+		PluginState:         fwkplugin.NewPluginState(ctx),
+		cfg:                 resolved,
+		percentilesDataKey:  attrlatency.TTFTPercentilesDataKey.WithNonEmptyProducerName(name),
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		state:               map[string]*endpointState{},
 	}, nil
 }
 

@@ -30,7 +30,7 @@ It builds on the request-control hooks and publishes statistics as a datalayer a
 
 | hook | what it does |
 |---|---|
-| `Produce` | Update inflight load at the time of current request |
+| `Produce` | Read and pin each candidate's in-flight load, before this request joins it |
 | `PreRequest` | Record the endpoint decision to enable capturing endpoint statistics |
 | `ResponseBody`, first chunk | Capture TTFT and append it to that endpoint's observation window |
 | `Dispatch` | Every `intervalDuration`, recompute the percentiles and publish |

@@ -35,7 +35,7 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 - `inflight-load-producer` **optionally** consumes `PrefixCacheMatchInfo` from an approx or precise prefix producer; prefix-discounting is applied automatically when the attribute is present.
 - `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error) — set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
 - `predicted-latency-producer` **optionally** consumes `PrefixCacheMatchInfo`; set `prefixMatchInfoProducerName` in its config to the name of the prefix producer instance.
-- `latency-observer-producer` **requires** `InFlightLoad`, so `inflight-load-producer` is ordered ahead of it and auto-created when absent. It must itself be listed under `dataLayer.sources`, which is what drives its recompute; auto-creation alone leaves every endpoint reading cold.
+- `latency-observer-producer` **requires** `InFlightLoad`, so `inflight-load-producer` is ordered ahead of it and auto-created when absent. It must itself be listed under `dataLayer.sources`; auto-creation from `latency-observation-scorer`'s required data key only wires the attribute, not the periodic tick that publishes it. See the [producer README](latencyobserver/README.md#configuration).
 
 ## Related documentation
 

@@ -202,6 +202,36 @@ func TestConcurrentRecording(t *testing.T) {
 	assert.Equal(t, int64(goroutines*perGoroutine), state.observations)
 }
 
+// record and publish contend for the same endpoint's lock: requests append while
+// the datalayer recomputes. Run under -race; the assertion is that no
+// observation is lost and the last published snapshot sees all of them.
+func TestConcurrentRecordAndPublish(t *testing.T) {
+	p := newObserver(t)
+	ctx := context.Background()
+	const observations = 500
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range observations {
+			p.record("default/a", 0.5, 3, time.Now())
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			p.publish(ctx, "default/a", p.stateFor("default/a"), time.Now())
+			snapshot := p.stateFor("default/a").published.Load()
+			require.NotNil(t, snapshot)
+			assert.Equal(t, int64(observations), snapshot.Observations)
+			return
+		default:
+			p.publish(ctx, "default/a", p.stateFor("default/a"), time.Now())
+		}
+	}
+}
+
 func TestDumpState(t *testing.T) {
 	p := newObserver(t)
 	p.record("default/busy", 0.5, 3, time.Now())
