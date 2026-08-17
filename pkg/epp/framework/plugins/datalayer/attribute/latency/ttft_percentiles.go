@@ -23,7 +23,7 @@ import (
 )
 
 // TTFTPercentilesDataKey carries the per-endpoint TTFT summary the
-// latency-observation-scorer reads, published by the latency-observer-producer.
+// latency-observation-scorer-hub reads, published by the latency-observer-producer-hub.
 var TTFTPercentilesDataKey = plugin.NewDataKey("TTFTPercentilesDataKey", observerconstants.LatencyObserverProducerType)
 
 // TTFTPercentiles summarises an endpoint's recent time-to-first-token

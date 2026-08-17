@@ -1,6 +1,6 @@
 # Latency Observation Scorer
 
-**Type:** `latency-observation-scorer`
+**Type:** `latency-observation-scorer-hub`
 
 A black-box scorer that ranks endpoints by their predicted time-to-first-token.
 It consumes the latency snapshot published by the
@@ -138,7 +138,7 @@ and ties for the win, taking a share of all traffic before anything is known abo
 | `explorationRate` | 0.1 | Per-endpoint probability of probing an under-observed endpoint. Range `[0, 1]` | Raise to give new or recovered endpoints a better chance of being tried; `0` sends everything to the trusted winner |
 | `minInflightGap` | 2.0 | In-flight separation the two load anchors need before the low-load one is used. Must be > 0 | Raise to be stricter about when the curve is trusted; lower to use it on endpoints whose load barely varies |
 | `roundTTFTStep` | 0.0 | Rounding step for predictions, in seconds. `0` disables. Must be >= 0 | Set to about `0.01` (10 ms) when endpoints swap over differences too small to matter |
-| `ttftPercentilesProducerName` | "" | Which `latency-observer-producer` instance to read. Empty uses the default | — |
+| `ttftPercentilesProducerName` | "" | Which `latency-observer-producer-hub` instance to read. Empty uses the default | — |
 | `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | — |
 
 
@@ -146,9 +146,9 @@ and ties for the win, taking a share of all traffic before anything is known abo
 
 ```yaml
 plugins:
-  - type: latency-observer-producer
+  - type: latency-observer-producer-hub
     name: ttft-observer
-  - type: latency-observation-scorer
+  - type: latency-observation-scorer-hub
     name: ttft
     parameters:
       explorationRate: 0.1

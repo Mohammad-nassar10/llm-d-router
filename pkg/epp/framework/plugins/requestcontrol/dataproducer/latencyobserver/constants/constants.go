@@ -18,5 +18,5 @@ package constants
 
 // LatencyObserverProducerType is the plugin type of the producer that observes
 // per-endpoint time-to-first-token and publishes the percentile anchors the
-// latency-observation-scorer reads.
-const LatencyObserverProducerType = "latency-observer-producer"
+// latency-observation-scorer-hub reads.
+const LatencyObserverProducerType = "latency-observer-producer-hub"

@@ -1,6 +1,6 @@
 # Latency Observer Producer
 
-**Type:** `latency-observer-producer`
+**Type:** `latency-observer-producer-hub`
 
 A black-box observer that produces latency data for a black-box latency scorer.
 It tracks requests and responses and publishes a small latency snapshot of TTFT percentiles that the
@@ -143,14 +143,14 @@ Only `inflight-load-producer` is auto-created, from this producer's own required
 
 ```yaml
 plugins:
-  - type: latency-observer-producer
+  - type: latency-observer-producer-hub
     name: ttft-observer
     parameters:
       intervalDuration: 1s
       minRequests: 10
       bucketDuration: 1m
       bucketHistorySize: 1000
-  - type: latency-observation-scorer
+  - type: latency-observation-scorer-hub
     name: ttft
     parameters:
       ttftPercentilesProducerName: ttft-observer

@@ -37,7 +37,7 @@ import (
 )
 
 // ScorerType is the plugin type of the latency-observation scorer.
-const ScorerType = "latency-observation-scorer"
+const ScorerType = "latency-observation-scorer-hub"
 
 const (
 	// Non-zero: at zero an uncalibrated endpoint is seeded at the best observed
@@ -54,7 +54,7 @@ var (
 )
 
 // Config holds the scorer's tunables. The percentiles and the minRequests
-// threshold belong to the latency-observer-producer and arrive in its snapshot.
+// threshold belong to the latency-observer-producer-hub and arrive in its snapshot.
 // See README.md for what each field does.
 type Config struct {
 	// Probability that an under-observed endpoint is probed. Range [0, 1].
