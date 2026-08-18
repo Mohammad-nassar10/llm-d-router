@@ -241,6 +241,10 @@ type DataLayerConfig struct {
 	// If omitted, the EPP uses the default Kubernetes-based discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
 	// +optional
+	// PeerDiscovery specifies which PeerDiscovery plugin to use for discovering
+	// peer EPP replicas. If omitted, peer discovery is disabled.
+	PeerDiscovery *PeerDiscoveryConfig `json:"peerDiscovery,omitempty"`
+	// +optional
 	// CrossReplicaSyncerPluginRef names the plugin instance to use as the cross-EPP
 	// cross-replica syncer. The reference is to the name of an entry in the
 	// top-level Plugins section. If omitted, no cross-replica syncer is used
@@ -257,8 +261,8 @@ func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
-		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, PeerDiscovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
+		dlc.Sources, dlc.Discovery, dlc.PeerDiscovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
 }
 
 // DiscoveryConfig references the EndpointDiscovery plugin to use.
@@ -275,6 +279,22 @@ func (dc *DiscoveryConfig) String() string {
 		return nilString
 	}
 	return fmt.Sprintf("{PluginRef: %s}", dc.PluginRef)
+}
+
+// PeerDiscoveryConfig references the PeerDiscovery plugin to use.
+type PeerDiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements PeerDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (pdc *PeerDiscoveryConfig) String() string {
+	if pdc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", pdc.PluginRef)
 }
 
 // DataLayerSource contains the configuration of a DataSource of the DataLayer feature
