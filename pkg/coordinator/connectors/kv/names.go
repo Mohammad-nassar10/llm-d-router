@@ -20,4 +20,6 @@ const (
 	NIXL          = "kv-nixl"
 	SharedStorage = "kv-shared-storage"
 	SGLang        = "kv-sglang"
+	// None disables KV transfer entirely, for aggregated (non-P/D) pipelines.
+	None = "kv-none"
 )

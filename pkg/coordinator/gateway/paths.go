@@ -21,6 +21,7 @@ import "strings"
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathCompletions     = "/v1/completions"
+	PathResponses       = "/v1/responses"
 	DefaultGeneratePath = "/inference/v1/generate"
 
 	EPPProfileHeader  = "EPP-Profile"
