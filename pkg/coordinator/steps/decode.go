@@ -17,10 +17,17 @@ limitations under the License.
 package steps
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"time"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -37,10 +44,22 @@ func init() {
 	pipeline.Register(DecodeStepName, NewDecodeStep)
 }
 
+// persistResponseLimitBytes caps how much of a decode response the persist
+// hook buffers before handing it to the persistence service.
+const persistResponseLimitBytes = 32 << 20 // 32 MB
+
 type DecodeStep struct {
 	useOpenAIFormat bool
 	gwClient        *gateway.Client
 	kv              kv.Connector
+	// prefillPresent is false for aggregated pipelines; the decode request then
+	// omits kv_transfer_params, since no prefill leg produced any blocks.
+	prefillPresent bool
+	// persistAddress, when set, enables the /v1/responses persist hook: the
+	// decode response is stored by the persistence service and replaced with
+	// the envelope it returns.
+	persistAddress string
+	persistClient  *http.Client
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -59,7 +78,30 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn}, nil
+	persistAddress, err := paramString(params, "persist_address")
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	persistTimeout := 30 * time.Second
+	if v, ok, err := paramDuration(params, "persist_timeout"); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	} else if ok {
+		persistTimeout = v
+	}
+	prefillPresent := true
+	if v, ok, err := paramBool(params, ParamPrefillPresent); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	} else if ok {
+		prefillPresent = v
+	}
+	return &DecodeStep{
+		useOpenAIFormat: useOpenAI,
+		gwClient:        gwClient,
+		kv:              kvConn,
+		prefillPresent:  prefillPresent,
+		persistAddress:  persistAddress,
+		persistClient:   &http.Client{Timeout: persistTimeout},
+	}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -76,9 +118,77 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	proxy := newDecodeProxy(logger, s.gwClient.Transport(), nil)
+	var modifyResponse func(*http.Response) error
+	if s.persistAddress != "" && len(reqCtx.ResponsesHydration) > 0 {
+		// The hook rewrites the body, which a content-encoded one would defeat.
+		proxyReq.Header.Del("Accept-Encoding")
+		modifyResponse = s.persistHydratedResponse(ctx, logger, reqCtx)
+	}
+
+	proxy := newDecodeProxy(logger, s.gwClient.Transport(), modifyResponse)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
 	return nil
+}
+
+// persistHydratedResponse returns the ModifyResponse hook for a hydrated
+// /v1/responses request: it sends the decode response and the hydration context
+// to the persistence service, and replaces the body with the envelope it
+// returns (which carries the stored response id). Failures become 502s — a
+// response whose turn was not persisted carries an id that can never be
+// continued, so it must not look successful.
+func (s *DecodeStep) persistHydratedResponse(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext) func(*http.Response) error {
+	return func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			// Upstream errors pass through untouched; there is nothing to persist.
+			return nil
+		}
+		upstream, err := io.ReadAll(io.LimitReader(resp.Body, persistResponseLimitBytes+1))
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.V(logutil.DEFAULT).Info("closing decode response body", "err", closeErr)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: reading decode response for persist: %w", DecodeStepName, err)
+		}
+		if len(upstream) > persistResponseLimitBytes {
+			return fmt.Errorf("%s: decode response exceeds persist limit of %d bytes", DecodeStepName, persistResponseLimitBytes)
+		}
+
+		payload, err := json.Marshal(map[string]json.RawMessage{
+			"context":  reqCtx.ResponsesHydration,
+			"response": upstream,
+		})
+		if err != nil {
+			return fmt.Errorf("%s: marshal persist request: %w", DecodeStepName, err)
+		}
+
+		persistReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.persistAddress+persistPath, bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("%s: build persist request: %w", DecodeStepName, err)
+		}
+		persistReq.ContentLength = int64(len(payload))
+		persistReq.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+
+		persistResp, err := s.persistClient.Do(persistReq)
+		if err != nil {
+			return fmt.Errorf("%s: persist request failed: %w", DecodeStepName, err)
+		}
+		defer persistResp.Body.Close()
+
+		if persistResp.StatusCode != http.StatusOK {
+			return fmt.Errorf("%s: persist service returned HTTP %d: %s",
+				DecodeStepName, persistResp.StatusCode, readErrorBody(persistResp.Body))
+		}
+		envelope, err := io.ReadAll(io.LimitReader(persistResp.Body, persistResponseLimitBytes))
+		if err != nil {
+			return fmt.Errorf("%s: reading persist response: %w", DecodeStepName, err)
+		}
+
+		resp.Body = io.NopCloser(bytes.NewReader(envelope))
+		resp.ContentLength = int64(len(envelope))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(envelope)))
+		logger.V(logutil.DEFAULT).Info("complete: turn persisted, envelope forwarded", "envelope_bytes", len(envelope))
+		return nil
+	}
 }
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
@@ -94,10 +204,14 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
 	case gateway.FormatChatCompletions:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		if s.prefillPresent {
+			reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		}
 		s.injectTokensField(reqCtx)
 	case gateway.FormatCompletions:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		if s.prefillPresent {
+			reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		}
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
@@ -106,12 +220,14 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
 		// so the decode worker never pulls the prefill KV over NIXL. Merge into
 		// the client's sampling_params to preserve max_tokens and other fields.
-		sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
-		if !ok {
-			sampling = map[string]any{}
-			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
+		if s.prefillPresent {
+			sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
+			if !ok {
+				sampling = map[string]any{}
+				reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
+			}
+			setGenerateTransferParams(sampling, kvParams, nil)
 		}
-		setGenerateTransferParams(sampling, kvParams, nil)
 	}
 }
 

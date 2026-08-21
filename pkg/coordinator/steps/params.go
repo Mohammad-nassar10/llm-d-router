@@ -27,6 +27,8 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
+	// ParamPrefillPresent is injected by the builder; absent means true.
+	ParamPrefillPresent = "prefill_present"
 )
 
 const ModalityImage = "image"

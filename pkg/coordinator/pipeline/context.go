@@ -17,6 +17,7 @@ limitations under the License.
 package pipeline
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -89,6 +90,11 @@ type RequestContext struct {
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+
+	// ResponsesHydration is the opaque persistence context from the hydration
+	// service. Set by the responses-hydrate step, echoed back by the decode
+	// step's persist hook. Empty for every other request.
+	ResponsesHydration json.RawMessage
 }
 
 // MultimodalEntry describes one downloaded multimodal item (e.g. an image) and
