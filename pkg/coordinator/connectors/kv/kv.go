@@ -62,8 +62,6 @@ func Build(name string) (Connector, error) {
 		return sharedStorageKV{}, nil
 	case SGLang:
 		return sglangKV{}, nil
-	case None:
-		return noneKV{}, nil
 	default:
 		return nil, fmt.Errorf("unknown kv_connector: %q", name)
 	}

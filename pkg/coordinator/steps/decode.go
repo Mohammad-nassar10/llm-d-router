@@ -52,9 +52,12 @@ type DecodeStep struct {
 	useOpenAIFormat bool
 	gwClient        *gateway.Client
 	kv              kv.Connector
-	// persistAddress, when set, enables the /v1/responses persist hook: hydrated
-	// requests have their decode response stored by the persistence service and
-	// replaced with the returned response envelope.
+	// prefillPresent is false for aggregated pipelines; the decode request then
+	// omits kv_transfer_params, since no prefill leg produced any blocks.
+	prefillPresent bool
+	// persistAddress, when set, enables the /v1/responses persist hook: the
+	// decode response is stored by the persistence service and replaced with
+	// the envelope it returns.
 	persistAddress string
 	persistClient  *http.Client
 }
@@ -85,10 +88,17 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	} else if ok {
 		persistTimeout = v
 	}
+	prefillPresent := true
+	if v, ok, err := paramBool(params, ParamPrefillPresent); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	} else if ok {
+		prefillPresent = v
+	}
 	return &DecodeStep{
 		useOpenAIFormat: useOpenAI,
 		gwClient:        gwClient,
 		kv:              kvConn,
+		prefillPresent:  prefillPresent,
 		persistAddress:  persistAddress,
 		persistClient:   &http.Client{Timeout: persistTimeout},
 	}, nil
@@ -188,21 +198,18 @@ func (s *DecodeStep) persistHydratedResponse(ctx context.Context, logger logr.Lo
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
-	// No params (kv-none) means there is no transfer to announce; sending the
-	// field anyway asks the pod to fetch KV blocks no prefill leg produced.
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
-	hasKVTransfer := len(kvParams) > 0
 	s.injectUUIDs(reqCtx)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
 	case gateway.FormatChatCompletions:
-		if hasKVTransfer {
+		if s.prefillPresent {
 			reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		}
 		s.injectTokensField(reqCtx)
 	case gateway.FormatCompletions:
-		if hasKVTransfer {
+		if s.prefillPresent {
 			reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		}
 		if len(reqCtx.TokenIDs) > 0 {
@@ -213,7 +220,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
 		// so the decode worker never pulls the prefill KV over NIXL. Merge into
 		// the client's sampling_params to preserve max_tokens and other fields.
-		if hasKVTransfer {
+		if s.prefillPresent {
 			sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
 			if !ok {
 				sampling = map[string]any{}

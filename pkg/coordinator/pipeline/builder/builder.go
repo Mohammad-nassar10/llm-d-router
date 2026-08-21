@@ -57,17 +57,33 @@ func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector stri
 	return out
 }
 
+// hasStep reports whether the configured pipeline contains a step of the given type.
+func hasStep(p config.PipelineConfig, stepType string) bool {
+	for _, s := range p.Steps {
+		if s.Type == stepType {
+			return true
+		}
+	}
+	return false
+}
+
 // Build validates cfg.Pipeline and constructs its steps in order.
 func Build(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Step, error) {
 	if err := validatePipeline(cfg.Pipeline); err != nil {
 		return nil, err
 	}
 
+	// No prefill leg means no KV transfer to announce on the decode request.
+	prefillPresent := hasStep(cfg.Pipeline, steps.PrefillStepName)
+
 	var pipelineSteps []pipeline.Step
 	for _, stepCfg := range cfg.Pipeline.Steps {
 		params := mergeConnectorDefaults(stepCfg.Params, cfg.Pipeline.KVConnector, cfg.Pipeline.ECConnector)
 		if _, ok := params["use_openai_format"]; !ok {
 			params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
+		}
+		if _, ok := params[steps.ParamPrefillPresent]; !ok {
+			params[steps.ParamPrefillPresent] = prefillPresent
 		}
 		step, err := pipeline.Build(stepCfg.Type, gwClient, params)
 		if err != nil {
