@@ -92,5 +92,34 @@ func Build(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Step, error
 
 		pipelineSteps = append(pipelineSteps, step)
 	}
+	_ = wireToolRoundSteps(pipelineSteps)
 	return pipelineSteps, nil
+}
+
+// wireToolRoundSteps hands decode the steps it should replay for each tool
+// round: those between hydration and serving.
+//
+// Hydration is excluded because the body is already hydrated by then — running
+// it again would mint a second response id. Decode is excluded because a
+// replayed round must not start a tool loop of its own.
+func wireToolRoundSteps(pipelineSteps []pipeline.Step) []pipeline.Step {
+	first := 0
+	for i, step := range pipelineSteps {
+		if step.Name() == steps.ResponsesHydrateStepName {
+			first = i + 1
+		}
+	}
+	var replay []pipeline.Step
+	for _, step := range pipelineSteps[first:] {
+		if step.Name() == steps.DecodeStepName {
+			break
+		}
+		replay = append(replay, step)
+	}
+	for _, step := range pipelineSteps {
+		if decode, ok := step.(*steps.DecodeStep); ok {
+			decode.SetToolRoundSteps(replay)
+		}
+	}
+	return replay
 }

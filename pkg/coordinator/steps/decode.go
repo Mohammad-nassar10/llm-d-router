@@ -48,6 +48,24 @@ func init() {
 // hook buffers before handing it to the persistence service.
 const persistResponseLimitBytes = 32 << 20 // 32 MB
 
+// defaultMaxToolRounds is a backstop, not the real budget: the state service
+// ends its own loop first, stopping at ten rounds and marking the turn
+// incomplete. This only bounds a service that never reports done.
+const defaultMaxToolRounds = 12
+
+// toolRoundDone is the status the state service reports when the response it
+// was just given is the final one.
+const toolRoundDone = "done"
+
+// toolRoundResponse is one round of the tool loop: either the next request to
+// send the model, or the signal that this turn is final. The context grows each
+// round, so the last one is what persist must receive.
+type toolRoundResponse struct {
+	Status  string          `json:"status"`
+	Request json.RawMessage `json:"request"`
+	Context json.RawMessage `json:"context"`
+}
+
 type DecodeStep struct {
 	useOpenAIFormat bool
 	gwClient        *gateway.Client
@@ -60,6 +78,24 @@ type DecodeStep struct {
 	// the envelope it returns.
 	persistAddress string
 	persistClient  *http.Client
+	// toolsAddress, when set, enables the gateway tool loop: between inference
+	// and persist, the state service executes the tools it owns and returns the
+	// next request to send. Only requests it flagged at hydration use it.
+	toolsAddress  string
+	toolsClient   *http.Client
+	maxToolRounds int
+	// toolRoundSteps are replayed for every round after the first: the steps
+	// between hydration and serving. Without them a tool round would go straight
+	// to the gateway, so a guard or compaction step would apply to round 1 only.
+	// Decode is deliberately not in this list, which is what makes a replayed
+	// round unable to start a loop of its own.
+	toolRoundSteps []pipeline.Step
+}
+
+// SetToolRoundSteps wires the replay list. The builder calls it once the whole
+// pipeline is constructed, since a step cannot see its siblings at build time.
+func (s *DecodeStep) SetToolRoundSteps(steps []pipeline.Step) {
+	s.toolRoundSteps = steps
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -94,6 +130,26 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	} else if ok {
 		prefillPresent = v
 	}
+	toolsAddress, err := paramString(params, "tools_address")
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	// A tool round is bounded by the tools it runs, not by an inference call.
+	toolsTimeout := 120 * time.Second
+	if v, ok, err := paramDuration(params, "tools_timeout"); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	} else if ok {
+		toolsTimeout = v
+	}
+	maxToolRounds := defaultMaxToolRounds
+	if v, ok, err := paramInt(params, "max_tool_rounds"); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	} else if ok {
+		if v < 1 {
+			return nil, fmt.Errorf("decode: max_tool_rounds must be at least 1, got %d", v)
+		}
+		maxToolRounds = v
+	}
 	return &DecodeStep{
 		useOpenAIFormat: useOpenAI,
 		gwClient:        gwClient,
@@ -101,6 +157,9 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 		prefillPresent:  prefillPresent,
 		persistAddress:  persistAddress,
 		persistClient:   &http.Client{Timeout: persistTimeout},
+		toolsAddress:    toolsAddress,
+		toolsClient:     &http.Client{Timeout: toolsTimeout},
+		maxToolRounds:   maxToolRounds,
 	}, nil
 }
 
@@ -142,15 +201,20 @@ func (s *DecodeStep) persistHydratedResponse(ctx context.Context, logger logr.Lo
 			// Upstream errors pass through untouched; there is nothing to persist.
 			return nil
 		}
-		upstream, err := io.ReadAll(io.LimitReader(resp.Body, persistResponseLimitBytes+1))
+		upstream, err := readLimitedBody(resp.Body, "decode response")
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			logger.V(logutil.DEFAULT).Info("closing decode response body", "err", closeErr)
 		}
 		if err != nil {
-			return fmt.Errorf("%s: reading decode response for persist: %w", DecodeStepName, err)
+			return err
 		}
-		if len(upstream) > persistResponseLimitBytes {
-			return fmt.Errorf("%s: decode response exceeds persist limit of %d bytes", DecodeStepName, persistResponseLimitBytes)
+
+		// Tools the state service owns run before the turn is stored: the answer
+		// being persisted has to be the one that used their results.
+		if s.toolsAddress != "" && reqCtx.ResponsesToolLoop {
+			if upstream, err = s.runToolRounds(ctx, logger, reqCtx, upstream); err != nil {
+				return err
+			}
 		}
 
 		payload, err := json.Marshal(map[string]json.RawMessage{
@@ -160,27 +224,9 @@ func (s *DecodeStep) persistHydratedResponse(ctx context.Context, logger logr.Lo
 		if err != nil {
 			return fmt.Errorf("%s: marshal persist request: %w", DecodeStepName, err)
 		}
-
-		persistReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.persistAddress+persistPath, bytes.NewReader(payload))
+		envelope, err := s.postInternal(ctx, s.persistClient, s.persistAddress+persistPath, payload, "persist")
 		if err != nil {
-			return fmt.Errorf("%s: build persist request: %w", DecodeStepName, err)
-		}
-		persistReq.ContentLength = int64(len(payload))
-		persistReq.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
-
-		persistResp, err := s.persistClient.Do(persistReq)
-		if err != nil {
-			return fmt.Errorf("%s: persist request failed: %w", DecodeStepName, err)
-		}
-		defer persistResp.Body.Close()
-
-		if persistResp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s: persist service returned HTTP %d: %s",
-				DecodeStepName, persistResp.StatusCode, readErrorBody(persistResp.Body))
-		}
-		envelope, err := io.ReadAll(io.LimitReader(persistResp.Body, persistResponseLimitBytes))
-		if err != nil {
-			return fmt.Errorf("%s: reading persist response: %w", DecodeStepName, err)
+			return err
 		}
 
 		resp.Body = io.NopCloser(bytes.NewReader(envelope))
@@ -189,6 +235,140 @@ func (s *DecodeStep) persistHydratedResponse(ctx context.Context, logger logr.Lo
 		logger.V(logutil.DEFAULT).Info("complete: turn persisted, envelope forwarded", "envelope_bytes", len(envelope))
 		return nil
 	}
+}
+
+// runToolRounds drives the gateway tool loop and returns the final upstream
+// response. Each round hands the state service the request that was sent and the
+// response that came back; it runs the tools it owns, appends their outputs and
+// returns the next request, so every model call still goes through the gateway
+// and its endpoint picker. The coordinator inspects none of it: the request and
+// the context are opaque JSON it only moves.
+func (s *DecodeStep) runToolRounds(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, upstream []byte) ([]byte, error) {
+	request, err := json.Marshal(reqCtx.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: marshal decode body for the tool loop: %w", DecodeStepName, err)
+	}
+
+	for round := 0; round < s.maxToolRounds; round++ {
+		payload, err := json.Marshal(map[string]json.RawMessage{
+			"context":  reqCtx.ResponsesHydration,
+			"request":  request,
+			"response": upstream,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%s: marshal tool round request: %w", DecodeStepName, err)
+		}
+		body, err := s.postInternal(ctx, s.toolsClient, s.toolsAddress+toolsPath, payload, "tool round")
+		if err != nil {
+			return nil, err
+		}
+
+		var next toolRoundResponse
+		if err := json.Unmarshal(body, &next); err != nil {
+			return nil, fmt.Errorf("%s: decode tool round response: %w", DecodeStepName, err)
+		}
+		if len(next.Context) == 0 {
+			return nil, fmt.Errorf("%s: tool round returned no context", DecodeStepName)
+		}
+		// The context accumulates this turn's calls and outputs, so persist has
+		// to receive the one from the last round.
+		reqCtx.ResponsesHydration = next.Context
+		if next.Status == toolRoundDone {
+			logger.V(logutil.DEFAULT).Info("tool loop complete", "rounds", round)
+			return upstream, nil
+		}
+		if len(next.Request) == 0 {
+			return nil, fmt.Errorf("%s: tool round status %q carried no request", DecodeStepName, next.Status)
+		}
+
+		request = next.Request
+		logger.V(logutil.DEFAULT).Info("tool round: tools ran, calling the model again",
+			"round", round+1, "replayed_steps", len(s.toolRoundSteps))
+		if upstream, err = s.serveOnce(ctx, reqCtx, request); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("%s: tool loop exceeded %d rounds", DecodeStepName, s.maxToolRounds)
+}
+
+// serveOnce runs one extra round: it replays the pipeline steps between
+// hydration and serving against the new request, then makes the inference call.
+// It runs exactly once and contains no loop, so re-entry cannot nest.
+func (s *DecodeStep) serveOnce(ctx context.Context, reqCtx *pipeline.RequestContext, request []byte) ([]byte, error) {
+	inner, err := reqCtx.ForToolRound(request)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", DecodeStepName, err)
+	}
+	if inner.ToolRoundDepth > 1 {
+		return nil, fmt.Errorf("%s: tool round re-entered at depth %d", DecodeStepName, inner.ToolRoundDepth)
+	}
+
+	for _, step := range s.toolRoundSteps {
+		if err := step.Execute(ctx, inner); err != nil {
+			return nil, fmt.Errorf("%s: tool round step %q: %w", DecodeStepName, step.Name(), err)
+		}
+	}
+
+	body, err := json.Marshal(inner.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: marshal tool round request: %w", DecodeStepName, err)
+	}
+	return s.serveToolRound(ctx, inner, body)
+}
+
+// serveToolRound makes one extra inference call for the tool loop. It cannot be
+// proxied like the first: its response is consumed here rather than streamed, so
+// it goes through the gateway client the way the prefill leg does.
+func (s *DecodeStep) serveToolRound(ctx context.Context, reqCtx *pipeline.RequestContext, body []byte) ([]byte, error) {
+	headers := reqCtx.ForwardedHeaders()
+	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
+	headers[gateway.EPPProfileHeader] = gateway.PhaseDecode
+
+	resp, err := s.gwClient.Post(ctx, reqCtx.OriginalPath, body, headers)
+	if err != nil {
+		return nil, fmt.Errorf("%s: tool round inference request: %w", DecodeStepName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, upstreamError(DecodeStepName, resp.StatusCode, readErrorBody(resp.Body))
+	}
+	return readLimitedBody(resp.Body, "tool round response")
+}
+
+// postInternal calls one of the state service's cluster-internal endpoints and
+// returns its body. Every failure is an error, never a fake success: a turn that
+// was not stored carries an id the client can never continue from.
+func (s *DecodeStep) postInternal(ctx context.Context, client *http.Client, url string, payload []byte, what string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("%s: build %s request: %w", DecodeStepName, what, err)
+	}
+	req.ContentLength = int64(len(payload))
+	req.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s request failed: %w", DecodeStepName, what, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: %s service returned HTTP %d: %s",
+			DecodeStepName, what, resp.StatusCode, readErrorBody(resp.Body))
+	}
+	return readLimitedBody(resp.Body, what+" response")
+}
+
+// readLimitedBody buffers a body, refusing one past persistResponseLimitBytes.
+// Buffering is an exposure the streaming path never had, so it stays bounded.
+func readLimitedBody(body io.Reader, what string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, persistResponseLimitBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: reading %s: %w", DecodeStepName, what, err)
+	}
+	if len(data) > persistResponseLimitBytes {
+		return nil, fmt.Errorf("%s: %s exceeds the limit of %d bytes", DecodeStepName, what, persistResponseLimitBytes)
+	}
+	return data, nil
 }
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike

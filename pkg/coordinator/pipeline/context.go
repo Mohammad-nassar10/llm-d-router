@@ -18,6 +18,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -95,6 +96,38 @@ type RequestContext struct {
 	// service. Set by the responses-hydrate step, echoed back by the decode
 	// step's persist hook. Empty for every other request.
 	ResponsesHydration json.RawMessage
+
+	// ResponsesToolLoop reports that this request declares tools the state
+	// service executes itself, so decode must run tool rounds before persisting.
+	ResponsesToolLoop bool
+
+	// ToolRoundDepth is 0 for a client request and 1 for a replayed tool round.
+	// Nothing should ever reach 2: a replayed round carries no hydration context
+	// and so installs no hook. It is a backstop that fails loudly if a future
+	// change reintroduces nesting.
+	ToolRoundDepth int
+}
+
+// ForToolRound derives the context for one replayed tool round from the request
+// the state service handed back.
+//
+// The hydration context is deliberately dropped. Decode installs its persist and
+// tool-loop hook only when one is present, so a replayed round cannot start a
+// loop of its own — the guarantee is structural rather than a flag anyone has to
+// remember to check.
+func (r *RequestContext) ForToolRound(body json.RawMessage) (*RequestContext, error) {
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("tool round body: %w", err)
+	}
+	return &RequestContext{
+		RequestID:       r.RequestID,
+		OriginalPath:    r.OriginalPath,
+		OriginalHeaders: r.OriginalHeaders,
+		Body:            parsed,
+		Model:           r.Model,
+		ToolRoundDepth:  r.ToolRoundDepth + 1,
+	}, nil
 }
 
 // MultimodalEntry describes one downloaded multimodal item (e.g. an image) and

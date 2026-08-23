@@ -58,3 +58,26 @@ func TestValidatePipeline(t *testing.T) {
 		})
 	}
 }
+
+// A pipeline without a prefill step is aggregated: decode must be told so, or
+// it announces a KV transfer no prefill leg produced.
+func TestBuild_MarksAggregatedPipelines(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []config.StepConfig
+		want  bool
+	}{
+		{"prefill and decode", []config.StepConfig{
+			{Type: steps.PrefillStepName}, {Type: steps.DecodeStepName}}, true},
+		{"decode only", []config.StepConfig{{Type: steps.DecodeStepName}}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.PipelineConfig{Steps: tc.steps, UseOpenAIFormat: true}
+			if got := hasStep(cfg, steps.PrefillStepName); got != tc.want {
+				t.Errorf("hasStep(prefill) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -39,8 +39,14 @@ const ResponsesHydrateStepName = "responses-hydrate"
 // Paths on the hydration service (agentic-api's cluster-internal API).
 const (
 	hydratePath = "/internal/hydrate"
+	toolsPath   = "/internal/tools"
 	persistPath = "/internal/persist"
 )
+
+// toolLoopQuery tells the hydration service that this caller runs the tool
+// loop. Without it a request declaring gateway-owned tools is refused, rather
+// than answered with those tools silently unexecuted.
+const toolLoopQuery = "?tool_loop=true"
 
 func init() {
 	pipeline.Register(ResponsesHydrateStepName, NewResponsesHydrateStep)
@@ -56,6 +62,9 @@ func init() {
 type ResponsesHydrateStep struct {
 	serviceAddress string
 	client         *http.Client
+	// toolLoop declares that the decode step is configured to run tool rounds.
+	// Set it together with decode's tools_address, never on its own.
+	toolLoop bool
 }
 
 func NewResponsesHydrateStep(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -84,9 +93,17 @@ func NewResponsesHydrateStep(_ *gateway.Client, params map[string]any) (pipeline
 		ForceAttemptHTTP2:   true,
 	}
 
+	toolLoop := false
+	if v, ok, err := paramBool(params, "tool_loop"); err != nil {
+		return nil, err
+	} else if ok {
+		toolLoop = v
+	}
+
 	return &ResponsesHydrateStep{
 		serviceAddress: address,
 		client:         &http.Client{Timeout: timeout, Transport: transport},
+		toolLoop:       toolLoop,
 	}, nil
 }
 
@@ -111,6 +128,9 @@ func (s *ResponsesHydrateStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	}
 
 	url := s.serviceAddress + hydratePath
+	if s.toolLoop {
+		url += toolLoopQuery
+	}
 	logger.V(logutil.DEFAULT).Info("sending request", "url", url, "body_size", len(body))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -136,6 +156,10 @@ func (s *ResponsesHydrateStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	var hydration struct {
 		Request map[string]any  `json:"request"`
 		Context json.RawMessage `json:"context"`
+		// GatewayTools reports that this turn needs tool rounds between
+		// inference and persist. Most requests do not, so the decode step only
+		// calls the tool endpoint when it is set.
+		GatewayTools bool `json:"gateway_tools"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&hydration); err != nil {
 		return fmt.Errorf("%s: decode response: %w", ResponsesHydrateStepName, err)
@@ -146,6 +170,8 @@ func (s *ResponsesHydrateStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 	reqCtx.Body = hydration.Request
 	reqCtx.ResponsesHydration = hydration.Context
-	logger.V(logutil.DEFAULT).Info("complete: request hydrated", "hydrated_body_fields", len(hydration.Request))
+	reqCtx.ResponsesToolLoop = hydration.GatewayTools
+	logger.V(logutil.DEFAULT).Info("complete: request hydrated",
+		"hydrated_body_fields", len(hydration.Request), "gateway_tools", hydration.GatewayTools)
 	return nil
 }
